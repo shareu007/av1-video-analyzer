@@ -1,0 +1,8 @@
+# AV1Scope shared native demux Worker request Golden v1. Tabs are significant.
+# name	source_bytes	maximum_probe_bytes	maximum_sample_bytes	maximum_records	track	expected_hex_or_error
+default	1024	16777216	1073741824	250000	-1	4131444d58303100010000003800000000040000000000000000000100000000000000400000000090d0030000000000ffffffff00000000
+track	64	32	4096	7	2	4131444d58303100010000003800000040000000000000002000000000000000001000000000000007000000000000000200000000000000
+input_too_large	67108865	32	1	1	-1	err:InputTooLarge
+probe_too_small	0	31	1	1	-1	err:InvalidProbeBudget
+sample_zero	0	32	0	1	-1	err:InvalidSampleBudget
+records_zero	0	32	1	0	-1	err:InvalidRecordBudget

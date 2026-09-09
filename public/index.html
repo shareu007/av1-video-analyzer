@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>AV1Scope · AV1 Bitstream Analyzer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="app-bar">
+      <div class="brand" aria-label="AV1Scope">
+        <span>AV1Scope</span>
+      </div>
+      <div class="file-summary" id="file-summary">
+        <strong>No bitstream open</strong>
+        <span>AV1 · MP4 / WebM / IVF / OBU</span>
+      </div>
+      <div class="app-actions">
+        <span class="service-status checking" id="service-status" role="status" aria-live="polite" title="Checking local service">Check service</span>
+        <button class="icon-button" id="theme-button" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">◐</button>
+        <button class="secondary-button" id="compare-button" type="button" disabled>Load comparison stream</button>
+        <details class="action-menu" id="export-menu">
+          <summary class="secondary-button">Export</summary>
+          <div class="action-menu-content">
+            <button class="secondary-button" id="export-button" type="button" disabled>Export JSON</button>
+            <button class="secondary-button" id="csv-button" type="button" disabled>Export CSV</button>
+            <button class="secondary-button" id="png-button" type="button" disabled>Export frame PNG</button>
+          </div>
+        </details>
+        <details class="action-menu" id="tools-menu">
+          <summary class="secondary-button">Tools</summary>
+          <div class="action-menu-content">
+            <button class="secondary-button" id="overlay-button" type="button" disabled>Import block data</button>
+            <button class="secondary-button" id="snapshot-button" type="button" disabled>Open snapshot</button>
+            <button class="secondary-button" id="cache-gc-button" type="button" disabled>Storage maintenance</button>
+          </div>
+        </details>
+        <button class="primary-button" id="open-button" type="button">
+          <span aria-hidden="true">＋</span> Open bitstream
+        </button>
+        <input id="file-input" type="file" accept=".ivf,.obu,.av1,.mp4,.webm,video/av1,video/mp4,video/webm,application/octet-stream" hidden>
+        <input id="overlay-input" type="file" accept=".json,application/json" hidden>
+        <input id="compare-input" type="file" accept=".ivf,.obu,.av1,.mp4,.webm,video/av1,video/mp4,video/webm,application/octet-stream" hidden>
+        <input id="snapshot-source-input" type="file" accept=".ivf,.obu,.av1,.mp4,.webm,video/av1,video/mp4,video/webm,application/octet-stream" hidden>
+      </div>
+    </header>
+
+    <main class="workspace diagnostics-collapsed" id="workspace" aria-busy="false">
+      <aside class="panel structure-panel" aria-label="Structure navigation">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">STRUCTURE</span>
+            <h2>Bitstream structure</h2>
+          </div>
+          <span class="count-pill" id="structure-count">0</span>
+        </div>
+        <div class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="structure-filter" type="search" placeholder="Filter OBUs or fields" aria-label="Filter structure">
+        </div>
+        <label class="structure-scope"><input id="structure-all-frames" type="checkbox">Show all frames <span id="structure-scope-label">Follow current frame</span></label>
+        <nav class="structure-tree" id="structure-tree" aria-label="OBU list" role="listbox">
+          <div class="panel-empty compact">
+            <span class="empty-icon">⌁</span>
+            <p>Frames and OBUs appear after opening an AV1 file</p>
+          </div>
+        </nav>
+      </aside>
+
+      <section class="center-column">
+        <section class="panel timeline-panel" aria-label="Frame timeline">
+          <div class="panel-heading horizontal">
+            <div>
+              <span class="eyebrow">TIMELINE</span>
+              <h2>Frame timeline</h2>
+            </div>
+            <div class="frame-navigation" aria-label="Frame navigation">
+              <button class="icon-button" id="previous-frame" type="button" aria-label="Previous frame" disabled>‹</button>
+              <span id="frame-position" aria-live="polite">No frame selected</span>
+              <button class="icon-button" id="next-frame" type="button" aria-label="Next frame" disabled>›</button>
+              <form id="frame-jump-form"><input id="frame-jump-input" type="number" min="0" step="1" aria-label="Jump to frame index" placeholder="Frame index" disabled><button class="secondary-button" type="submit">Go</button></form>
+            </div>
+          </div>
+          <div class="timeline" id="timeline" aria-label="Frame selection">
+            <div class="timeline-empty">Waiting for bitstream index</div>
+          </div>
+        </section>
+
+        <section class="panel viewport-panel" aria-label="Bitstream view">
+          <div class="viewport-toolbar">
+            <div class="segmented" role="tablist" aria-label="View mode">
+              <button class="active" id="hex-tab" type="button" role="tab" aria-selected="true" aria-controls="viewport-content" tabindex="0">Byte view</button>
+              <button id="frame-tab" type="button" role="tab" aria-selected="false" aria-controls="viewport-content" tabindex="-1">Frame preview</button>
+              <button id="overview-tab" type="button" role="tab" aria-selected="false" aria-controls="viewport-content" tabindex="-1">Structure overview</button>
+              <button id="frame-table-tab" type="button" role="tab" aria-selected="false" aria-controls="viewport-content" tabindex="-1">Frame analysis</button>
+              <button id="trace-tab" type="button" role="tab" aria-selected="false" aria-controls="viewport-content" tabindex="-1">FFmpeg Trace</button>
+              <button id="compare-tab" type="button" role="tab" aria-selected="false" aria-controls="viewport-content" tabindex="-1">Quality comparison</button>
+            </div>
+            <div class="selection-chip" id="selection-chip" hidden>No record selected</div>
+          </div>
+          <div class="viewport-content" id="viewport-content" role="tabpanel" aria-labelledby="hex-tab" tabindex="0">
+            <div class="hero-empty" id="drop-zone">
+              <h1>No stream loaded</h1>
+              <p>Open a file or drop it here to begin analysis.</p>
+              <div class="hero-actions">
+                <button class="primary-button" id="empty-open-button" type="button">Open file…</button>
+                <button class="secondary-button" id="demo-button" type="button">Open sample</button>
+              </div>
+              <small>MP4 · WebM · IVF · OBU　/　Ctrl or ⌘ + O to open</small>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="panel inspector-panel" aria-label="Field inspector">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">INSPECTOR</span>
+            <h2>Field inspector</h2>
+          </div>
+        </div>
+        <div class="inspector" id="inspector">
+          <div class="panel-empty">
+            <span class="empty-icon">◎</span>
+            <p>Select an OBU or syntax field to view its source range</p>
+          </div>
+        </div>
+      </aside>
+
+      <section class="panel diagnostics-panel diagnostics-collapsed" id="diagnostics-panel" aria-label="Diagnostics">
+        <div class="diagnostic-header">
+          <button class="diagnostic-toggle" id="diagnostic-toggle" type="button" aria-expanded="false" aria-controls="diagnostic-list">Diagnostics <span id="diagnostic-toggle-label">Expand</span></button>
+          <div class="diagnostic-stats" id="diagnostic-stats">
+            <span class="stat good"><b>0</b> errors</span>
+            <span class="stat neutral"><b>0</b> warnings</span>
+          </div>
+        </div>
+        <div class="diagnostic-list" id="diagnostic-list" aria-label="Diagnostics list">
+          <div class="diagnostic-ok"><span>✓</span> Analysis has not run</div>
+        </div>
+      </section>
+    </main>
+
+    <div class="busy-overlay" id="busy-overlay" role="dialog" aria-modal="true" aria-labelledby="busy-title" aria-describedby="busy-filename" hidden>
+      <div class="busy-card">
+        <span class="spinner" aria-hidden="true"></span>
+        <strong id="busy-title">Building index</strong>
+        <small id="busy-filename"></small>
+        <button class="secondary-button busy-cancel" id="cancel-analysis-button" type="button">Cancel analysis</button>
+      </div>
+    </div>
+    <dialog class="snapshot-dialog" id="snapshot-dialog" aria-labelledby="snapshot-dialog-title">
+      <form method="dialog" id="snapshot-form">
+        <header><h2 id="snapshot-dialog-title">Open Snapshot Store</h2><button value="cancel" aria-label="Close">×</button></header>
+        <p>Enter the 64-bit snapshot ID returned by the CLI <code>index</code> command. The GUI must use the same <code>--snapshot-dir</code>.</p>
+        <label>Snapshot ID<input id="snapshot-id-input" type="text" pattern="[0-9a-f]{64}" maxlength="64" autocomplete="off" spellcheck="false"></label>
+        <footer><button class="secondary-button" value="cancel">Cancel</button><button class="primary-button" id="snapshot-submit" value="snapshot">Open structure snapshot</button></footer>
+        <hr>
+        <p>You can also enter a derived ID from on-demand syntax inspection to replay frozen fields, diagnostics, and absolute bit ranges.</p>
+        <label>Derived Syntax ID<input id="derived-syntax-id-input" type="text" pattern="[0-9a-f]{64}" maxlength="64" autocomplete="off" spellcheck="false"></label>
+        <footer><button class="primary-button" id="derived-syntax-submit" value="derived">Open derived syntax</button></footer>
+        <hr>
+        <p>Enter an Overlay ID for merged OBUs to replay the unified SyntaxNode set.</p>
+        <label>Syntax Overlay ID<input id="syntax-overlay-id-input" type="text" pattern="[0-9a-f]{64}" maxlength="64" autocomplete="off" spellcheck="false"></label>
+        <footer><button class="primary-button" id="syntax-overlay-submit" value="overlay">Open Syntax Overlay</button></footer>
+      </form>
+    </dialog>
+    <dialog class="snapshot-dialog" id="cache-gc-dialog" aria-labelledby="cache-gc-dialog-title">
+      <form method="dialog" id="cache-gc-form">
+        <header><h2 id="cache-gc-dialog-title">Snapshot Store maintenance</h2><button value="cancel" aria-label="Close">×</button></header>
+        <p>Only rebuildable old/corrupt indexes and expired transaction directories are cleaned. Parent Snapshots, Derived Syntax, and Syntax Overlay contents are not deleted.</p>
+        <label>Minimum transaction age (ms)<input id="cache-gc-age-input" type="number" min="0" step="1000" value="3600000"></label>
+        <div class="cache-gc-results" id="cache-gc-results" aria-live="polite">Click “Preview plan” to scan the current store.</div>
+        <footer>
+          <button class="secondary-button" value="cancel">Close</button>
+          <button class="secondary-button" id="cache-gc-preview" type="button">Preview plan</button>
+          <button class="primary-button" id="cache-gc-apply" type="button" disabled>Confirm and run</button>
+        </footer>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

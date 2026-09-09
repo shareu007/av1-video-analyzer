@@ -1,0 +1,27 @@
+[workspace]
+members = [
+  "crates/av1-analysis",
+  "crates/av1-bits",
+  "crates/av1-ivf",
+  "crates/av1-model",
+  "crates/av1-native-demux",
+  "crates/av1-native-guard",
+  "crates/av1-native-sys",
+  "crates/av1-structural",
+  "crates/av1-worker-protocol",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

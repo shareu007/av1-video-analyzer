@@ -1,0 +1,85 @@
+diff --git a/av1/common/blockd.h b/av1/common/blockd.h
+index b95235fb7e..fe1b00ce9f 100644
+--- a/av1/common/blockd.h
++++ b/av1/common/blockd.h
+@@ -337,6 +337,8 @@ typedef struct MB_MODE_INFO {
+ #if CONFIG_INSPECTION
+   /*! \brief Whether we are skipping the current rows or columns. */
+   int16_t tx_skip[TXK_TYPE_BUF_LEN];
++  /*! \brief Number of non-zero luma coefficients in this coding block. */
++  uint32_t coeff_non_zero;
+ #endif
+ } MB_MODE_INFO;
+ 
+diff --git a/av1/decoder/decodeframe.c b/av1/decoder/decodeframe.c
+index cbf5e9121a..6e89a0c0c8 100644
+--- a/av1/decoder/decodeframe.c
++++ b/av1/decoder/decodeframe.c
+@@ -387,6 +387,9 @@ static inline void decode_mbmi_block(AV1Decoder *const pbi,
+   set_offsets(cm, xd, bsize, mi_row, mi_col, bw, bh, x_mis, y_mis);
+   xd->mi[0]->partition = partition;
+   av1_read_mode_info(pbi, dcb, r, x_mis, y_mis);
++#if CONFIG_INSPECTION
++  xd->mi[0]->coeff_non_zero = 0;
++#endif
+   if (bsize >= BLOCK_8X8 &&
+       (seq_params->subsampling_x || seq_params->subsampling_y)) {
+     const BLOCK_SIZE uv_subsize =
+diff --git a/av1/decoder/decodetxb.c b/av1/decoder/decodetxb.c
+index 17d67cbf68..7b8e080ab3 100644
+--- a/av1/decoder/decodetxb.c
++++ b/av1/decoder/decodetxb.c
+@@ -282,6 +282,9 @@ static uint8_t read_coeffs_txb(const AV1_COMMON *const cm,
+     uint8_t sign;
+     tran_low_t level = levels[get_padded_idx(pos, bhl)];
+     if (level) {
++#if CONFIG_INSPECTION
++      if (plane == AOM_PLANE_Y) ++mbmi->coeff_non_zero;
++#endif
+       *max_scan_line = AOMMAX(*max_scan_line, pos);
+       if (c == 0) {
+         const int dc_sign_ctx = txb_ctx->dc_sign_ctx;
+diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
+index f84ed17d20..02406220b9 100644
+--- a/av1/decoder/inspection.c
++++ b/av1/decoder/inspection.c
+@@ -56,6 +56,8 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+   fd->show_frame = cm->show_frame;
+   fd->frame_type = cm->current_frame.frame_type;
+   fd->base_qindex = quant_params->base_qindex;
++  fd->frame_width = cm->width;
++  fd->frame_height = cm->height;
+   // Set width and height of the first tile until generic support can be added
+   TileInfo tile_info;
+   av1_tile_set_row(&tile_info, cm, 0);
+@@ -108,6 +110,8 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+ 
+       // Block Size
+       mi->bsize = mbmi->bsize;
++      mi->partition = mbmi->partition;
++      mi->coeff_non_zero = (int32_t)mbmi->coeff_non_zero;
+       // Skip Flag
+       mi->skip = mbmi->skip_txfm;
+       mi->filter[0] = av1_extract_interp_filter(mbmi->interp_filters, 0);
+diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
+index 7d1c14db2a..e3b6efd1c3 100644
+--- a/av1/decoder/inspection.h
++++ b/av1/decoder/inspection.h
+@@ -55,6 +55,8 @@ struct insp_mi_data {
+   int16_t intrabc;
+   int16_t palette;
+   int16_t uv_palette;
++  int16_t partition;
++  int32_t coeff_non_zero;
+ };
+ 
+ typedef struct insp_frame_data insp_frame_data;
+@@ -68,6 +70,8 @@ struct insp_frame_data {
+   int show_frame;
+   int frame_type;
+   int base_qindex;
++  int frame_width;
++  int frame_height;
+   int mi_rows;
+   int mi_cols;
+   int tile_mi_rows;

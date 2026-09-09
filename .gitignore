@@ -1,0 +1,47 @@
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Build and coverage output
+coverage/
+dist/
+target/
+build/
+.docx-work/
+
+# Local agent/runtime metadata
+.agents/
+.codex/
+.git-local/
+.agent/
+AGENTS.md
+
+# Private inputs, personal documents, and machine-specific configuration
+media/
+*.docx
+.env
+.env.*
+*.local
+*.local.*
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+.netrc
+.ssh/
+config.local/
+secrets/
+credentials.json
+*.log
+
+# AV1Scope local analysis output
+*.av1scope.json
+*.av1scope-cache/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

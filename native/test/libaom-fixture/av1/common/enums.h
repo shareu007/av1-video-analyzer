@@ -1,0 +1,23 @@
+#ifndef AV1_ENUMS_H_
+#define AV1_ENUMS_H_
+
+#define INTRA_MODES 13
+#define BLOCK_SIZES_ALL 3
+
+enum {
+  PARTITION_NONE,
+  PARTITION_HORZ,
+  PARTITION_VERT,
+  PARTITION_SPLIT,
+  PARTITION_HORZ_A,
+  PARTITION_HORZ_B,
+  PARTITION_VERT_A,
+  PARTITION_VERT_B,
+  PARTITION_HORZ_4,
+  PARTITION_VERT_4,
+};
+
+extern const int mi_size_wide[BLOCK_SIZES_ALL];
+extern const int mi_size_high[BLOCK_SIZES_ALL];
+
+#endif

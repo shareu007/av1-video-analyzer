@@ -1,0 +1,18 @@
+[package]
+name = "av1-native-demux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+av1-native-guard = { path = "../av1-native-guard" }
+av1-native-sys = { path = "../av1-native-sys" }
+
+[lints.rust]
+unsafe_code = "allow"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "kind": "av1scope-block-golden-suite",
+  "buildId": "90b02b10cd719bc17f9013d8fc6a3195c7865c30",
+  "coverage": [
+    "compoundReference",
+    "compoundType",
+    "interMotion",
+    "intraPartitions",
+    "loopFilters",
+    "miCoordinates",
+    "quantDelta",
+    "segmentationQindex",
+    "transformCoefficients"
+  ],
+  "cases": [
+    {
+      "name": "motion-compound",
+      "sourceLicense": "CC0-1.0; project-generated synthetic video",
+      "inputFile": "motion-compound.ivf.base64",
+      "inputSha256": "bbc16df43a1203d41035668a0f61ccad8107b415b819978c11cb16a2e7d858df",
+      "expectedOverlayFile": "motion-compound.overlay.json.gz.base64",
+      "expectedOverlaySha256": "b7feac34aea41afd9f04971370be0a879bcbe9ea3c721aee8a08dab901aa2d73",
+      "width": 128,
+      "height": 96,
+      "frames": [
+        {
+          "frameId": 0,
+          "payloadRange": {
+            "start": 44,
+            "length": 1325
+          }
+        },
+        {
+          "frameId": 1,
+          "payloadRange": {
+            "start": 1381,
+            "length": 1662
+          }
+        },
+        {
+          "frameId": 2,
+          "payloadRange": {
+            "start": 3055,
+            "length": 5
+          }
+        },
+        {
+          "frameId": 3,
+          "payloadRange": {
+            "start": 3072,
+            "length": 331
+          }
+        },
+        {
+          "frameId": 4,
+          "payloadRange": {
+            "start": 3415,
+            "length": 24
+          }
+        },
+        {
+          "frameId": 5,
+          "payloadRange": {
+            "start": 3451,
+            "length": 1640
+          }
+        },
+        {
+          "frameId": 6,
+          "payloadRange": {
+            "start": 5103,
+            "length": 323
+          }
+        },
+        {
+          "frameId": 7,
+          "payloadRange": {
+            "start": 5438,
+            "length": 5
+          }
+        },
+        {
+          "frameId": 8,
+          "payloadRange": {
+            "start": 5455,
+            "length": 323
+          }
+        },
+        {
+          "frameId": 9,
+          "payloadRange": {
+            "start": 5790,
+            "length": 342
+          }
+        },
+        {
+          "frameId": 10,
+          "payloadRange": {
+            "start": 6144,
+            "length": 5
+          }
+        },
+        {
+          "frameId": 11,
+          "payloadRange": {
+            "start": 6161,
+            "length": 529
+          }
+        },
+        {
+          "frameId": 12,
+          "payloadRange": {
+            "start": 6702,
+            "length": 412
+          }
+        },
+        {
+          "frameId": 13,
+          "payloadRange": {
+            "start": 7126,
+            "length": 330
+          }
+        },
+        {
+          "frameId": 14,
+          "payloadRange": {
+            "start": 7468,
+            "length": 322
+          }
+        },
+        {
+          "frameId": 15,
+          "payloadRange": {
+            "start": 7802,
+            "length": 422
+          }
+        },
+        {
+          "frameId": 16,
+          "payloadRange": {
+            "start": 8236,
+            "length": 323
+          }
+        },
+        {
+          "frameId": 17,
+          "payloadRange": {
+            "start": 8571,
+            "length": 324
+          }
+        },
+        {
+          "frameId": 18,
+          "payloadRange": {
+            "start": 8907,
+            "length": 345
+          }
+        },
+        {
+          "frameId": 19,
+          "payloadRange": {
+            "start": 9264,
+            "length": 499
+          }
+        },
+        {
+          "frameId": 20,
+          "payloadRange": {
+            "start": 9775,
+            "length": 345
+          }
+        },
+        {
+          "frameId": 21,
+          "payloadRange": {
+            "start": 10132,
+            "length": 377
+          }
+        },
+        {
+          "frameId": 22,
+          "payloadRange": {
+            "start": 10521,
+            "length": 339
+          }
+        },
+        {
+          "frameId": 23,
+          "payloadRange": {
+            "start": 10872,
+            "length": 407
+          }
+        }
+      ]
+    },
+    {
+      "name": "q255-segmentation",
+      "sourceLicense": "CC0-1.0; project-generated synthetic video",
+      "inputFile": "q255-segmentation.ivf.base64",
+      "inputSha256": "a3666de093da83cabdd6694165f7990618d896b71f01e2c8ee34c6ddd6fd85cd",
+      "expectedOverlayFile": "q255-segmentation.overlay.json.gz.base64",
+      "expectedOverlaySha256": "6aa5acef1aa748845ba3f212a4fc289e939a63dc5fe21458e605caac521d0929",
+      "width": 96,
+      "height": 64,
+      "frames": [
+        {
+          "frameId": 0,
+          "payloadRange": {
+            "start": 44,
+            "length": 584
+          }
+        },
+        {
+          "frameId": 1,
+          "payloadRange": {
+            "start": 640,
+            "length": 41
+          }
+        },
+        {
+          "frameId": 2,
+          "payloadRange": {
+            "start": 693,
+            "length": 48
+          }
+        },
+        {
+          "frameId": 3,
+          "payloadRange": {
+            "start": 753,
+            "length": 50
+          }
+        },
+        {
+          "frameId": 4,
+          "payloadRange": {
+            "start": 815,
+            "length": 62
+          }
+        },
+        {
+          "frameId": 5,
+          "payloadRange": {
+            "start": 889,
+            "length": 47
+          }
+        },
+        {
+          "frameId": 6,
+          "payloadRange": {
+            "start": 948,
+            "length": 66
+          }
+        },
+        {
+          "frameId": 7,
+          "payloadRange": {
+            "start": 1026,
+            "length": 48
+          }
+        }
+      ]
+    }
+  ]
+}
