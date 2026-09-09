@@ -7,7 +7,7 @@ function isControl(target, viewport) {
   return Boolean(target.isPreviewControl);
 }
 
-/** Attach drag-to-pan behavior to a scrollable preview viewport. */
+/** Pan the entire image/overlay stage, including when it fits the viewport. */
 export function attachPreviewPan(viewport) {
   if (!viewport || typeof viewport.addEventListener !== "function") {
     throw new TypeError("attachPreviewPan requires an event target viewport");
@@ -15,6 +15,14 @@ export function attachPreviewPan(viewport) {
 
   let gesture = null;
   let suppressNextClick = false;
+  const stage = viewport.querySelector?.(".preview-stage");
+  const originalTranslate = stage?.style.translate;
+  let panX = 0;
+  let panY = 0;
+  if (stage) {
+    viewport.classList?.add("free-pan");
+    stage.style.translate = "0px 0px";
+  }
 
   const onPointerDown = (event) => {
     if (gesture || event.isPrimary === false || (event.button !== 0 && event.button !== 1)) return;
@@ -26,6 +34,8 @@ export function attachPreviewPan(viewport) {
       startY: event.clientY,
       scrollLeft: viewport.scrollLeft,
       scrollTop: viewport.scrollTop,
+      panX,
+      panY,
       moved: false,
       captured: false,
     };
@@ -46,8 +56,14 @@ export function attachPreviewPan(viewport) {
       }
       viewport.classList?.add("is-panning");
     }
-    viewport.scrollLeft = gesture.scrollLeft - dx;
-    viewport.scrollTop = gesture.scrollTop - dy;
+    if (stage) {
+      panX = gesture.panX + dx;
+      panY = gesture.panY + dy;
+      stage.style.translate = `${panX}px ${panY}px`;
+    } else {
+      viewport.scrollLeft = gesture.scrollLeft - dx;
+      viewport.scrollTop = gesture.scrollTop - dy;
+    }
     event.preventDefault?.();
   };
 
@@ -71,6 +87,13 @@ export function attachPreviewPan(viewport) {
   };
 
   const preventNativeDrag = (event) => event.preventDefault?.();
+  const resetPan = () => {
+    finish();
+    panX = 0;
+    panY = 0;
+    if (stage) stage.style.translate = "0px 0px";
+    else { viewport.scrollLeft = 0; viewport.scrollTop = 0; }
+  };
 
   viewport.addEventListener("pointerdown", onPointerDown);
   viewport.addEventListener("pointermove", onPointerMove);
@@ -80,6 +103,7 @@ export function attachPreviewPan(viewport) {
   viewport.addEventListener("lostpointercapture", finish);
   viewport.addEventListener("click", onClick, true);
   viewport.addEventListener("dragstart", preventNativeDrag);
+  viewport.addEventListener("dblclick", resetPan);
 
   return () => {
     viewport.removeEventListener("pointerdown", onPointerDown);
@@ -90,7 +114,12 @@ export function attachPreviewPan(viewport) {
     viewport.removeEventListener("lostpointercapture", finish);
     viewport.removeEventListener("click", onClick, true);
     viewport.removeEventListener("dragstart", preventNativeDrag);
+    viewport.removeEventListener("dblclick", resetPan);
     finish();
+    if (stage) {
+      stage.style.translate = originalTranslate ?? "";
+      viewport.classList?.remove("free-pan");
+    }
     viewport.classList?.remove("is-panning");
     gesture = null;
     suppressNextClick = false;

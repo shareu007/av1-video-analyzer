@@ -15,6 +15,30 @@ class SetClassList { constructor() { this.values = new Set(); } add(v) { this.va
 
 const pointer = (x, y, extra = {}) => ({ pointerId: 1, isPrimary: true, button: 0, clientX: x, clientY: y, target: null, ...extra });
 
+test("fitted pictures pan horizontally and vertically without any scroll overflow", () => {
+  const viewport = new FakeViewport();
+  const stage = { style: { translate: "" } };
+  viewport.querySelector = () => stage;
+  // Real browsers clamp scrolling to zero when the picture fits.
+  Object.defineProperty(viewport, "scrollLeft", { get: () => 0, set() {} });
+  Object.defineProperty(viewport, "scrollTop", { get: () => 0, set() {} });
+  const cleanup = attachPreviewPan(viewport);
+  viewport.emit("pointerdown", pointer(100, 100));
+  viewport.emit("pointermove", pointer(180, 100));
+  assert.equal(stage.style.translate, "80px 0px");
+  viewport.emit("pointerup", pointer(180, 100));
+  viewport.emit("pointerdown", pointer(180, 100));
+  viewport.emit("pointermove", pointer(50, 160));
+  assert.equal(stage.style.translate, "-50px 60px");
+  viewport.emit("pointerup", pointer(50, 160));
+  assert.equal(viewport.emit("click", pointer(50, 160), true).stopped, true);
+  viewport.emit("dblclick");
+  assert.equal(stage.style.translate, "0px 0px");
+  cleanup();
+  assert.equal(stage.style.translate, "");
+  assert.equal(viewport.classList.contains("free-pan"), false);
+});
+
 test("pans after threshold and suppresses the resulting click", () => {
   const viewport = new FakeViewport();
   const cleanup = attachPreviewPan(viewport);
