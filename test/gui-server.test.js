@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { blockAnnotationContent, layoutBlockAnnotations } from "../public/block-annotations.js";
+import { buildReferenceStateIndex, blockPredictionSources } from "../public/reference-state.js";
 
 import {
   analyzeFrameLuma,
@@ -114,6 +116,28 @@ test("media/test streams analyze through the GUI route with real block data", as
       assert.ok(blocks.length > 100);
       assert.ok(blocks.some(({ mode }) => mode === "inter"));
       assert.ok(blocks.some(({ mv }) => mv.length > 0));
+      const intra = blocks.find((block) => block.intraMode != null);
+      assert.ok(intra);
+      assert.match(blockAnnotationContent(intra, "mode").lines[0], /INTRA/);
+      assert.doesNotMatch(blockAnnotationContent(intra, "mode").lines[0], /INTRA_\d|Unavailable/);
+      const residual = blocks.find((block) => block.coeffNonZero > 0);
+      assert.ok(residual);
+      assert.equal(blockAnnotationContent(residual, "coefficients").lines[0], `NZ ${residual.coeffNonZero}`);
+      const motion = blocks.find((block) => block.mv.length > 0);
+      assert.match(blockAnnotationContent(motion, "motion").detail[0], /MV1 R\d: Δx .* px/);
+      const referenceStates = buildReferenceStateIndex(report);
+      assert.equal(referenceStates.get(0).after.length, 8);
+      for (const frameOverlay of report.blockOverlay.frames) {
+        const block = frameOverlay.blocks.find((entry) => entry.mv.length > 0);
+        if (!block) continue;
+        const sources = blockPredictionSources(block, referenceStates.get(frameOverlay.frameId), report.blockOverlay);
+        assert.ok(sources.length > 0);
+        assert.ok(sources.every((source) => source.slot != null && source.picture?.obuId != null && source.region), `${name} F${frameOverlay.frameId}: source mapping must resolve`);
+      }
+      for (const layer of ["mode", "coefficients", "motion"]) {
+        const labels = layoutBlockAnnotations(report.blockOverlay.frames[0].blocks, { layer, width: 256, height: 256, bounds: { width: 1024, height: 1024 } });
+        assert.ok(labels.length > 0, `${name}: ${layer} should have readable labels at 400%`);
+      }
       assert.ok(blocks.every(({ width, height, x, y }) => width > 0 && height > 0 && x >= 0 && y >= 0 && x + width <= 256 && y + height <= 256));
       const overlayId = response.headers["x-av1scope-block-overlay-id"];
       assert.match(overlayId, /^[0-9a-f]{64}$/);

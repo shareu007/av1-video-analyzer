@@ -14,7 +14,28 @@ const {
   summarizeMotionVectors,
   blockLayerLegend,
   overlayRasterSize,
+  coefficientDensity,
+  intraPredictionName,
+  blockAnalysisLabel,
 } = await import(moduleUrl);
+
+test("prediction labels decode all AV1 intra base modes without inventing unknown values", () => {
+  const names = ["DC", "Vertical", "Horizontal", "D45", "D135", "D113", "D157", "D203", "D67", "Smooth", "Smooth V", "Smooth H", "Paeth"];
+  names.forEach((name, code) => assert.equal(intraPredictionName(`INTRA_${code}`), name));
+  assert.equal(intraPredictionName("INTRA_99"), "INTRA_99");
+  assert.equal(blockAnalysisLabel({ intraMode: "INTRA_0", mode: "skip" }, "mode"), "DC");
+});
+
+test("coefficient display distinguishes unavailable, zero and normalized block activity", () => {
+  assert.equal(coefficientDensity({ width: 8, height: 8, coeffNonZero: null }), null);
+  assert.equal(coefficientDensity({ width: 8, height: 8, coeffNonZero: -1 }), null);
+  assert.equal(blockAnalysisLabel({ width: 8, height: 8, coeffNonZero: 0 }, "coefficients"), "0 · 0.0%");
+  const small = { width: 8, height: 8, coeffNonZero: 4 };
+  const large = { width: 16, height: 16, coeffNonZero: 16 };
+  assert.equal(coefficientDensity(small), coefficientDensity(large));
+  const colors = buildBlockInstanceData([small, large], { layer: "coefficients" }).colors;
+  assert.deepEqual([...colors.slice(0, 4)], [...colors.slice(4)]);
+});
 
 test("block spatial index picks the smallest overlapping block", () => {
   const large = { blockId: 0, x: 0, y: 0, width: 64, height: 64 };

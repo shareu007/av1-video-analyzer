@@ -129,12 +129,40 @@ function programFor(gl, vertexSource = RECT_VERTEX_SHADER, fragmentSource = RECT
   return program;
 }
 
+// AV1 PREDICTION_MODE values 0..12. Direction names are base modes;
+// angle_delta and filter-intra submodes are not exported by this producer.
+const INTRA_NAMES = ["DC", "Vertical", "Horizontal", "D45", "D135", "D113", "D157", "D203", "D67", "Smooth", "Smooth V", "Smooth H", "Paeth"];
+export function intraPredictionName(value) {
+  const match = /^INTRA_(\d+)$/.exec(String(value));
+  return match ? INTRA_NAMES[Number(match[1])] ?? String(value) : value ?? "Unavailable";
+}
+
+export function coefficientDensity(block) {
+  if (!Number.isFinite(block.coeffNonZero) || block.coeffNonZero < 0 || !(block.width > 0 && block.height > 0)) return null;
+  return block.coeffNonZero / (block.width * block.height);
+}
+
+export function blockAnalysisLabel(block, layer) {
+  if (layer === "mode") return block.intraMode != null ? intraPredictionName(block.intraMode) : block.interMode ?? block.mode ?? "Unavailable";
+  if (layer === "coefficients") {
+    const density = coefficientDensity(block);
+    return density === null ? "N/A" : `${block.coeffNonZero} · ${(density * 100).toFixed(1)}%`;
+  }
+  return "";
+}
+
 function colorFor(block, layer, opacity) {
   if (layer === "none" || layer === "partition" || layer === "motion") return [0, 0, 0, 0];
   if (layer === "coefficients") {
-    if (!Number.isFinite(block.coeffNonZero)) return [0.51, 0.59, 0.66, opacity];
-    const value = Math.min(1, Math.log2(1 + Math.max(0, block.coeffNonZero)) / 12);
+    const density = coefficientDensity(block);
+    if (density === null) return [0.51, 0.59, 0.66, opacity];
+    if (density === 0) return [0.06, 0.08, 0.12, opacity];
+    const value = Math.log2(1 + 255 * Math.min(1, density)) / 8;
     return [value, 0.25 + (1 - value) * 0.55, 1 - value, opacity];
+  }
+  if (layer === "mode" && /^INTRA_\d+$/.test(block.intraMode ?? "")) {
+    const code = Number(block.intraMode.slice(6));
+    if (code < 13) return [0.25 + (code % 3) * 0.25, 0.4 + (code % 4) * 0.15, 0.25 + (code % 5) * 0.15, opacity];
   }
   if (layer === "qindex") {
     if (block.qindex === null || block.qindex === undefined) return [0.51, 0.59, 0.66, opacity];
@@ -176,8 +204,9 @@ export function buildBlockInstanceData(blocks, { layer = "mode", opacity = 0.28 
 }
 
 export function blockLayerLegend(layer) {
+  if (layer === "mode") return [...INTRA_NAMES.map((label, code) => ({ label, color: `rgb(${colorFor({ intraMode: `INTRA_${code}` }, "mode", 1).slice(0, 3).map((v) => Math.round(v * 255)).join(",")})` })), { label: "Inter prediction", color: "#4ba4ff" }, { label: "Skip", color: "#ffb547" }];
   if (layer === "motion") return [{ label: "Motion vectors · reference colors in Block statistics", color: null }];
-  if (layer === "coefficients") return [{ label: "0 coefficients", color: "#00ccff" }, { label: "4095+ coefficients", color: "#ff4000" }, { label: "Unavailable", color: "#8296a8" }];
+  if (layer === "coefficients") return [{ label: "Zero coefficients", color: "#0f141f" }, { label: "Sparse → dense (log scale, 0–100%)", color: "linear-gradient(90deg,#00ccff,#ff4000)" }, { label: "Labels: non-zero count · count / block area", color: null }, { label: "Unavailable", color: "#8296a8" }];
   if (layer === "none") return [{ label: "Original frame · no block overlay", color: null }];
   if (layer === "partition") return [{ label: "Coding block boundaries", color: "#ebf7ff" }];
   if (layer === "qindex") return [

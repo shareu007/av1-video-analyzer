@@ -8,7 +8,7 @@ function isControl(target, viewport) {
 }
 
 /** Pan the entire image/overlay stage, including when it fits the viewport. */
-export function attachPreviewPan(viewport) {
+export function attachPreviewPan(viewport, { viewState = {} } = {}) {
   if (!viewport || typeof viewport.addEventListener !== "function") {
     throw new TypeError("attachPreviewPan requires an event target viewport");
   }
@@ -19,10 +19,37 @@ export function attachPreviewPan(viewport) {
   const originalTranslate = stage?.style.translate;
   let panX = 0;
   let panY = 0;
+  const geometry = () => {
+    if (!stage?.getBoundingClientRect || !viewport.getBoundingClientRect) return null;
+    const picture = stage.getBoundingClientRect();
+    const bounds = viewport.getBoundingClientRect();
+    if (!(picture.width > 0 && picture.height > 0 && viewport.clientWidth > 0 && viewport.clientHeight > 0)) return null;
+    return { picture, x: bounds.left + viewport.clientWidth / 2, y: bounds.top + viewport.clientHeight / 2 };
+  };
+  const rememberCenter = () => {
+    const measured = geometry();
+    if (measured) viewState.center = {
+      x: (measured.x - measured.picture.left) / measured.picture.width,
+      y: (measured.y - measured.picture.top) / measured.picture.height,
+    };
+  };
+  const restoreCenter = () => {
+    const measured = geometry();
+    if (!measured) return;
+    const center = viewState.center ?? { x: 0.5, y: 0.5 };
+    panX += measured.x - measured.picture.left - measured.picture.width * center.x;
+    panY += measured.y - measured.picture.top - measured.picture.height * center.y;
+    stage.style.translate = `${panX}px ${panY}px`;
+    viewState.center = center;
+  };
   if (stage) {
     viewport.classList?.add("free-pan");
     stage.style.translate = "0px 0px";
+    restoreCenter();
   }
+  const observer = stage && typeof ResizeObserver !== "undefined" ? new ResizeObserver(restoreCenter) : null;
+  observer?.observe(viewport);
+  if (stage) observer?.observe(stage);
 
   const onPointerDown = (event) => {
     if (gesture || event.isPrimary === false || (event.button !== 0 && event.button !== 1)) return;
@@ -60,6 +87,7 @@ export function attachPreviewPan(viewport) {
       panX = gesture.panX + dx;
       panY = gesture.panY + dy;
       stage.style.translate = `${panX}px ${panY}px`;
+      rememberCenter();
     } else {
       viewport.scrollLeft = gesture.scrollLeft - dx;
       viewport.scrollTop = gesture.scrollTop - dy;
@@ -93,6 +121,19 @@ export function attachPreviewPan(viewport) {
     panY = 0;
     if (stage) stage.style.translate = "0px 0px";
     else { viewport.scrollLeft = 0; viewport.scrollTop = 0; }
+    viewState.center = { x: 0.5, y: 0.5 };
+    restoreCenter();
+  };
+  const onKeyDown = (event) => {
+    if (event.target !== viewport || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Home") { event.preventDefault(); resetPan(); return; }
+    const delta = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] }[event.key];
+    if (!delta || !stage) return;
+    event.preventDefault();
+    finish();
+    panX += delta[0]; panY += delta[1];
+    stage.style.translate = `${panX}px ${panY}px`;
+    rememberCenter();
   };
 
   viewport.addEventListener("pointerdown", onPointerDown);
@@ -104,8 +145,10 @@ export function attachPreviewPan(viewport) {
   viewport.addEventListener("click", onClick, true);
   viewport.addEventListener("dragstart", preventNativeDrag);
   viewport.addEventListener("dblclick", resetPan);
+  viewport.addEventListener("keydown", onKeyDown);
 
-  return () => {
+  const cleanup = () => {
+    observer?.disconnect();
     viewport.removeEventListener("pointerdown", onPointerDown);
     viewport.removeEventListener("pointermove", onPointerMove);
     viewport.removeEventListener("pointerup", finish);
@@ -115,6 +158,7 @@ export function attachPreviewPan(viewport) {
     viewport.removeEventListener("click", onClick, true);
     viewport.removeEventListener("dragstart", preventNativeDrag);
     viewport.removeEventListener("dblclick", resetPan);
+    viewport.removeEventListener("keydown", onKeyDown);
     finish();
     if (stage) {
       stage.style.translate = originalTranslate ?? "";
@@ -124,4 +168,6 @@ export function attachPreviewPan(viewport) {
     gesture = null;
     suppressNextClick = false;
   };
+  cleanup.reset = resetPan;
+  return cleanup;
 }

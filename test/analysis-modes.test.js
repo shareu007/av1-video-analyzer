@@ -4,7 +4,7 @@ import { analysisModes } from "../public/analysis-modes.js";
 
 test("analysis modes require actual block data and distinguish unsupported decode stages", () => {
   assert.deepEqual(analysisModes([]).filter((mode) => mode.available).map((mode) => mode.id), ["yuv"]);
-  const modes = analysisModes([{ mode: "inter", coeffNonZero: 0, qindex: 0, mv: [{ x: 0, y: 0 }] }]);
+  const modes = analysisModes([{ mode: "inter", coeffNonZero: 0, qindex: 0, mv: [{ x: 0, y: 0, precision: "integer" }] }]);
   for (const id of ["coding-flow", "predictions", "residuals", "info-overlays", "simple-motion", "yuv"]) {
     assert.equal(modes.find((mode) => mode.id === id).available, true, id);
   }
@@ -13,4 +13,27 @@ test("analysis modes require actual block data and distinguish unsupported decod
   }
   assert.match(modes.find((mode) => mode.id === "residuals").note, /Signed residual samples are not available/);
   assert.equal(analysisModes([{ coeffNonZero: 10 }], () => false).find((mode) => mode.id === "residuals").available, false);
+});
+
+test("analysis modes ignore invalid values but accept zero-valued data", () => {
+  const invalid = analysisModes([{
+    mode: "future",
+    coeffNonZero: Number.NaN,
+    qindex: 256,
+    mv: [{ x: 1, y: 1, precision: "future" }],
+  }]);
+  assert.equal(invalid.find((mode) => mode.id === "predictions").available, false);
+  assert.equal(invalid.find((mode) => mode.id === "residuals").available, false);
+  assert.equal(invalid.find((mode) => mode.id === "info-overlays").available, false);
+  assert.equal(invalid.find((mode) => mode.id === "simple-motion").available, false);
+
+  const valid = analysisModes([{
+    mode: "skip",
+    coeffNonZero: 0,
+    qindex: 0,
+    mv: [{ x: 0, y: 0, precision: "integer" }],
+  }]);
+  for (const id of ["predictions", "residuals", "info-overlays", "simple-motion"]) {
+    assert.equal(valid.find((mode) => mode.id === id).available, true, id);
+  }
 });

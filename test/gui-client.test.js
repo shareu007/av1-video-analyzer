@@ -19,6 +19,7 @@ async function client(fetch, crypto = webcrypto) {
     markup = "";
     children = [];
     attributes = new Map();
+    style = {};
     set innerHTML(value) {
       this.markup = value;
       this.children = [...value.matchAll(/<(button|details)\b([^>]*)>/g)].map(([, tag, attributes]) => {
@@ -39,6 +40,10 @@ async function client(fetch, crypto = webcrypto) {
       listeners.push(listener);
       this.listeners.set(type, listeners);
     }
+    removeEventListener(type, listener) {
+      this.listeners.set(type, (this.listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    }
+    remove() { this.removed = true; }
     async dispatch(type, event = {}) {
       for (const listener of this.listeners.get(type) ?? []) await listener(event);
       if (this.parent && !event.stopped) await this.parent.dispatch(type, event);
@@ -51,11 +56,14 @@ async function client(fetch, crypto = webcrypto) {
     querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
     setAttribute(name, value) { this.attributes.set(name, value); }
     scrollIntoView() {}
+    after(value) { this.nextSibling = value; }
+    append(value) { this.children.push(value); }
     focus() {}
   }
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const document = new Element();
+  document.createElement = () => new Element();
   document.body = new Element();
   document.documentElement = new Element();
   document.querySelector = (selector) => elements.get(selector.slice(1)) ?? null;
@@ -187,6 +195,35 @@ async function multiFrameClient(count = 3) {
   return result;
 }
 
+test("reference tables and timeline arcs use real frame targets and slot mappings", async () => {
+  const { app, elements, context } = await multiFrameClient();
+  app.state.selectedFrameId = 2;
+  context.referenceStateFor = () => ({ summary: { referenceFrameIds: [0, 1, 0], referenceSlotIndices: [0, 1, 2] }, bindings: [{ reference: 1, slot: 0, frameId: 0 }, { reference: 2, slot: 1, frameId: 1 }], after: Array(8).fill(null) });
+  const timeline = elements.get("timeline");
+  const track = new timeline.constructor(), svg = new timeline.constructor();
+  track.getBoundingClientRect = () => ({ left: 20, width: 270 });
+  const originalQuery = timeline.querySelector.bind(timeline);
+  timeline.querySelector = (selector) => {
+    if (selector === ".timeline-track") return track;
+    if (selector === ".timeline-reference-arcs") return svg;
+    const result = originalQuery(selector);
+    if (result) result.getBoundingClientRect = () => ({ left: 20 + Number(result.dataset.frameId) * 90, width: 86 });
+    return result;
+  };
+  context.requestAnimationFrame = (callback) => { callback(); return 1; };
+  context.cancelAnimationFrame = () => {};
+  vm.runInContext("renderTimeline()", context);
+  const map = elements.get("timeline").nextSibling;
+  assert.equal(map.querySelectorAll("[data-reference-frame]").length, 2);
+  assert.match(map.innerHTML, /Prediction references · before decode/);
+  assert.match(map.innerHTML, /Reference slots · after decode/);
+  assert.match(svg.innerHTML, /M 223 2 L 223 18 L 43 18 L 43 2/);
+  assert.equal((svg.innerHTML.match(/marker-end=/g) ?? []).length, 2);
+  vm.runInContext("selectFrame = (id) => { window.referenceClicked = id; }", context);
+  await map.querySelector('[data-reference-frame="1"]').dispatch("click");
+  assert.equal(context.window.referenceClicked, 1);
+});
+
 test("frame navigation keeps the selected OBU and structure scope synchronized", async () => {
   const { app, elements } = await multiFrameClient();
   const tree = elements.get("structure-tree");
@@ -301,7 +338,9 @@ test("leaving the preview clears pending statistics so returning can retry", asy
 });
 
 test("block layer controls redraw, preserve explicit boundaries and clean up resize observers", async () => {
-  const { context, elements, app, document } = await client(async () => health());
+  let finishReferencePreview;
+  const { context, elements, app, document } = await client(async (url) => url.startsWith("/api/preview")
+    ? new Promise((resolve) => { finishReferencePreview = resolve; }) : health());
   const viewport = elements.get("viewport-content");
   const nodes = new Map();
   const node = (selector) => {
@@ -310,7 +349,7 @@ test("block layer controls redraw, preserve explicit boundaries and clean up res
   };
   viewport.querySelector = node;
   const canvas = node(".block-overlay");
-  canvas.parentElement = {};
+  canvas.parentElement = new viewport.constructor();
   canvas.closest = () => viewport;
   canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 512, height: 512 });
   let legend;
@@ -331,14 +370,60 @@ test("block layer controls redraw, preserve explicit boundaries and clean up res
     observe() { this.callback(); }
     disconnect() { disconnected = true; }
   };
-  vm.runInContext('setupBlockOverlay([{blockId: 1, x: 0, y: 0, width: 16, height: 16, plane: "y", mode: "intra"}], 256, 256)', context);
+  vm.runInContext('setupBlockOverlay([{blockId: 1, x: 0, y: 0, width: 16, height: 16, plane: 0, mode: "intra", intraMode: "INTRA_0", coeffNonZero: 0}, {blockId: 2, x: 32, y: 0, width: 64, height: 64, plane: 0, mode: "inter", coeffNonZero: 24, refs: [2], mv: [{x: -8, y: 4, precision: "1/2 pel"}]}], 256, 256, true)', context);
   assert.equal(draws.at(-1).options.layer, "partition");
   assert.equal(node("#block-borders").disabled, true);
-  assert.match(legend.innerHTML, /Coding block boundaries/);
+  const legendText = () => legend.children.map((child) => child.textContent).join(" ");
+  assert.match(legendText(), /Coding block boundaries/);
+  const annotations = canvas.parentElement.children.find((child) => child.className === "block-annotations");
+  const readout = viewport.children.find((child) => child.className === "block-image-readout");
+  await node("#block-layer").dispatch("change", { target: { value: "mode" } });
+  const labelText = () => annotations.children.map((child) => child.textContent).join(" ");
+  assert.match(labelText(), /DC/);
+  assert.ok(new Set(annotations.children.map((child) => child.style.left)).size > 1);
+  assert.match(readout.innerHTML, /Predictions/);
+  await canvas.dispatch("click", { clientX: 4, clientY: 4 });
+  assert.match(readout.innerHTML, /Base mode: DC/);
+  context.referenceStateFor = () => ({ summary: { frameWidth: 256, frameHeight: 256 }, bindings: [{ reference: 2, slot: 0, frameId: 0, picture: { frameId: 0, obuId: 2, previewFrameId: 0, summary: { frameWidth: 256, frameHeight: 256 } } }] });
+  app.state.previews.set(0, { status: "ready", url: "blob:reference-test" });
+  app.state.overlay = { frames: [{ frameId: 0, blocks: [{ blockId: 100, x: 0, y: 0, width: 128, height: 128, plane: 0 }] }] };
+  await canvas.dispatch("click", { clientX: 80, clientY: 20 });
+  const sources = node(".preview-caption").nextSibling;
+  assert.match(sources.innerHTML, /R2 → Slot 0 → F0 \/ OBU 2/);
+  assert.match(sources.innerHTML, /Source \(28, 2\)/);
+  assert.match(sources.innerHTML, /Overlaps B100/);
+  assert.doesNotMatch(sources.innerHTML, /style=/);
+  app.state.previews.delete(0);
+  await canvas.dispatch("click", { clientX: 4, clientY: 4 });
+  await canvas.dispatch("click", { clientX: 80, clientY: 20 });
+  assert.equal(typeof finishReferencePreview, "function");
+  await canvas.dispatch("click", { clientX: 4, clientY: 4 });
+  finishReferencePreview(new Response(new Blob(["stale reference picture"])));
+  await new Promise(setImmediate);
+  assert.match(sources.innerHTML, /Intra prediction uses neighbours/);
+  assert.doesNotMatch(sources.innerHTML, /source-picture|reference-picture/);
+  await node("#block-labels").dispatch("change", { target: { value: "selected" } });
+  assert.equal(annotations.innerHTML, "");
+  assert.match(readout.innerHTML, /B1 · 16×16/);
+  await node("#block-labels").dispatch("change", { target: { value: "off" } });
+  assert.equal(readout.hidden, true);
+  await node("#block-labels").dispatch("change", { target: { value: "auto" } });
+  await node("#block-layer").dispatch("change", { target: { value: "coefficients" } });
+  assert.equal(sources.innerHTML, "");
+  assert.match(labelText(), /NZ 24/);
+  assert.match(readout.innerHTML, /Non-zero coefficients: 0/);
+  await node("#mv-toggle").dispatch("change", { target: { checked: true } });
+  await node("#block-layer").dispatch("change", { target: { value: "motion" } });
+  await canvas.dispatch("click", { clientX: 80, clientY: 20 });
+  assert.match(labelText(), /R2/);
+  assert.match(readout.innerHTML, /MV1 R2: Δx -4, Δy \+2 px/);
+  await node("#block-filter").dispatch("change", { target: { value: "intra" } });
+  assert.equal(app.state.selectedBlock, null);
+  assert.doesNotMatch(readout.innerHTML, /MV1 R2/);
   await node("#block-layer").dispatch("change", { target: { value: "qindex" } });
   assert.equal(draws.at(-1).options.layer, "qindex");
   assert.equal(node("#block-borders").disabled, false);
-  assert.match(legend.innerHTML, /QIndex 255/);
+  assert.match(legendText(), /QIndex 255/);
   await node("#block-borders").dispatch("change", { target: { checked: false } });
   assert.equal(draws.at(-1).options.showBorders, false);
   await node("#block-layer").dispatch("change", { target: { value: "none" } });
@@ -350,6 +435,9 @@ test("block layer controls redraw, preserve explicit boundaries and clean up res
   vm.runInContext("releaseBlockRenderer()", context);
   assert.equal(disconnected, true);
   assert.equal(destroyed, true);
+  assert.equal(annotations.removed, true);
+  assert.equal(readout.removed, true);
+  assert.equal(viewport.listeners.get("pointermove").length, 0);
 });
 
 test("property rows omit empty placeholders but retain zero and false", async () => {
@@ -384,7 +472,12 @@ test("preview defers luma computation until statistics are expanded", async () =
   app.state.selectedFrameId = 0;
   app.state.report = { frames: [{ frameId: 0, timestamp: 0, declaredSize: 100, obuIds: [] }], obus: [], syntaxNodes: [], container: { width: 256, height: 256 } };
   app.state.previews.set(0, { status: "ready", url: "blob:test" });
+  app.state.analysisMode = "simple-motion";
+  app.state.showMotionVectors = false;
   await vm.runInContext("renderFramePreview()", context);
+  assert.equal(app.state.analysisMode, "simple-motion", "a frame without block data must not overwrite the requested mode");
+  assert.equal(app.state.overlayLayer, "none", "a frame without blocks displays the decoded picture");
+  assert.equal(app.state.showMotionVectors, false, "rendering must not overwrite the user's vector toggle");
   assert.equal(statsRequests, 0);
   const details = nodes.get("#luma-details");
   assert.match(nodes.get(".frame-preview").markup, /<details[^>]+id="luma-details"><summary>Luma statistics/);

@@ -4,6 +4,8 @@ import {
   motionVectorReferenceColor,
   motionVectorToPixels,
   blockLayerLegend,
+  intraPredictionName,
+  coefficientDensity,
 } from "./block-renderer.js";
 import { filterBlockRecords, summarizeBlockStatistics } from "./block-statistics.js";
 import { buildNativeTraceFieldMap, compareTraceEntry } from "./trace-compare.js";
@@ -21,6 +23,9 @@ import { DEMO_SAMPLE_NAME, demoSampleBytes } from "./demo-sample.js";
 import { displayedFrameSummary, sourcePointFromClient } from "./preview-model.js";
 import { analysisModes } from "./analysis-modes.js";
 import { attachPreviewPan } from "./preview-pan.js";
+import { frameReferenceTargets } from "./frame-references.js";
+import { blockAnnotationContent, layoutBlockAnnotations, paintBlockAnnotationElements } from "./block-annotations.js";
+import { buildReferenceStateIndex, blockPredictionSources, timelineReferenceArcs } from "./reference-state.js";
 
 const elements = {
   openButton: document.querySelector("#open-button"),
@@ -110,6 +115,7 @@ const state = {
   previews: new Map(),
   frameStats: new Map(),
   blockStatisticsCache: new WeakMap(),
+  referenceStateCache: new WeakMap(),
   overlay: null,
   blockOverlaySnapshotId: null,
   blockOverlayStore: null,
@@ -120,7 +126,10 @@ const state = {
   controllers: new Map(),
   overlayLayer: "partition",
   analysisMode: "coding-flow",
+  previewView: {},
   showBlockBorders: true,
+  blockLabels: "auto",
+  dimAnalysisPicture: true,
   previewZoom: "fit",
   blockResizeObserver: null,
   blockAnimationFrame: null,
@@ -165,6 +174,8 @@ function abortOperations(...keys) {
 }
 
 function releaseBlockRenderer() {
+  state.blockAnnotationCleanup?.();
+  state.blockAnnotationCleanup = null;
   state.previewPanCleanup?.();
   state.previewPanCleanup = null;
   state.blockResizeObserver?.disconnect();
@@ -951,6 +962,8 @@ function updateDerivedSelectionControls() {
 }
 
 function renderSnapshotWorkspace(manifest) {
+  state.timelineCleanup?.();
+  elements.timeline.parentElement?.querySelector(".frame-reference-map")?.remove();
   const header = manifest.header;
   state.report = { ...header, frames: [], obus: [], syntaxNodes: [], diagnostics: [] };
   state.file = { name: header.source.name };
@@ -1053,6 +1066,8 @@ async function analyzeFile(file) {
       if (preview.status === "ready") URL.revokeObjectURL(preview.url);
     }
     state.previews.clear();
+    state.previewView = {};
+    state.previewZoom = "fit";
     state.frameStats.clear();
     const bytes = await file.arrayBuffer();
     const response = await fetch(`/api/analyze?name=${encodeURIComponent(file.name)}`, {
@@ -1441,24 +1456,30 @@ function exportFilteredFrameTable(format) {
 
 function renderTimeline() {
   const { report } = state;
+  state.timelineCleanup?.();
+  elements.timeline.parentElement?.querySelector(".frame-reference-map")?.remove();
   updateFrameNavigation();
   if (report.frames.length === 0) {
     elements.timeline.innerHTML = `<div class="timeline-empty">Raw OBU streams have no container frame timeline</div>`;
     return;
   }
-  const maxSize = report.frames.reduce(
-    (maximum, { declaredSize }) => Math.max(maximum, declaredSize), 1,
-  );
   const statisticPoints = new Map(
     (report.frameStatistics?.points ?? []).map((point) => [point.frameId, point]),
   );
   const selectedIndex = Math.max(0, report.frames.findIndex(({ frameId }) => frameId === state.selectedFrameId));
   const windowStart = Math.max(0, Math.min(selectedIndex - 30, report.frames.length - 80));
-  elements.timeline.innerHTML = report.frames.slice(windowStart, windowStart + 80)
+  const selectedFrame = report.frames[selectedIndex];
+  const referenceState = referenceStateFor(selectedFrame.frameId);
+  const summary = referenceState?.summary ?? displayedFrameSummary(report, selectedFrame);
+  const { targets, unresolvedSlots } = frameReferenceTargets(report, selectedFrame, summary);
+  const visibleIds = new Set(report.frames.slice(windowStart, windowStart + 80).map((frame) => frame.frameId));
+  for (const target of targets) visibleIds.add(target.frameId);
+  const timelineFrames = report.frames.filter((frame) => visibleIds.has(frame.frameId));
+  elements.timeline.innerHTML = `<div class="timeline-track"><div class="timeline-cards">${timelineFrames
     .map((frame) => {
       const hasDiagnostic = diagnosticsForFrame(frame.frameId).some(({ severity }) => severity === "error" || severity === "fatal" || severity === "warning");
-      const frameType = frame.headerSummary?.frameTypeName?.replace("_FRAME", "") ?? "FRAME";
-      const references = [...new Set(frame.headerSummary?.referenceFrameIds?.filter((id) => id !== null) ?? [])];
+      const frameType = displayedFrameSummary(report, frame)?.frameTypeName?.replace("_FRAME", "") ?? "FRAME";
+      const references = [...new Set(displayedFrameSummary(report, frame)?.referenceFrameIds?.filter((id) => id !== null) ?? [])];
       const relation = references.length ? `Refs ${references.map((id) => `#${id}`).join(", ")}` : "Intra / random access";
       const active = frame.frameId === state.selectedFrameId;
       const point = statisticPoints.get(frame.frameId);
@@ -1466,14 +1487,41 @@ function renderTimeline() {
         ? "" : ` · ${formatDuration(point.durationSeconds)}`;
       const bitrate = point?.bitrateBitsPerSecond === null || point?.bitrateBitsPerSecond === undefined
         ? "" : ` · ${formatBitrate(point.bitrateBitsPerSecond)}`;
-      return `<button type="button" class="frame-card ${active ? "active" : ""} ${hasDiagnostic ? "error" : ""} ${point?.keyframe ? "keyframe" : ""}" data-frame-id="${frame.frameId}" aria-pressed="${active}" tabindex="${active ? 0 : -1}" title="${escapeHtml(`PTS ${frame.timestamp}${timing} · ${relation}${bitrate} · ${frame.obuIds.length} OBU${hasDiagnostic ? " · Issues found" : ""}`)}" style="--weight:${Math.max(5, (frame.declaredSize / maxSize) * 100)}%"><b>${frame.decodeIndex} · ${escapeHtml(frameType)}</b><span>${formatBytes(frame.declaredSize)}${hasDiagnostic ? " · !" : ""}</span></button>`;
+      return `<button type="button" class="frame-card ${active ? "active" : ""} ${targets.some((target) => target.frameId === frame.frameId) ? "is-reference" : ""} ${hasDiagnostic ? "error" : ""} ${point?.keyframe ? "keyframe" : ""}" data-frame-id="${frame.frameId}" aria-pressed="${active}" tabindex="${active ? 0 : -1}" title="${escapeHtml(`PTS ${frame.timestamp}${timing} · ${relation}${bitrate} · ${frame.obuIds.length} OBU${hasDiagnostic ? " · Issues found" : ""}`)}"><b>${frame.decodeIndex} · ${escapeHtml(frameType)}</b><span>${formatBytes(frame.declaredSize)}${hasDiagnostic ? " · !" : ""}</span></button>`;
     })
-    .join("");
+    .join("")}</div><svg class="timeline-reference-arcs" aria-label="Arrows from selected frame to its references"></svg></div>`;
   elements.timeline.querySelectorAll("[data-frame-id]").forEach((button) => {
     button.addEventListener("click", () => selectFrame(Number(button.dataset.frameId)));
   });
   bindRovingNavigation(elements.timeline, "[data-frame-id]", "horizontal");
+  const referenceMap = document.createElement("div");
+  referenceMap.className = "frame-reference-map";
+  referenceMap.setAttribute("aria-label", "Selected frame reference relationships");
+  const pictureLink = (picture, frameId) => frameId == null ? "Unresolved" : `<button type="button" data-reference-frame="${frameId}">F${report.frames.find((frame) => frame.frameId === frameId)?.decodeIndex ?? frameId}${picture?.obuId != null ? ` / OBU ${picture.obuId}` : ""}${picture?.hidden ? " · hidden" : ""}</button>`;
+  referenceMap.innerHTML = `<details class="reference-state-panel" open><summary>Reference state · selected F${selectedFrame.decodeIndex}${unresolvedSlots.length ? ` · ${unresolvedSlots.length} unresolved` : ""}</summary><div class="reference-tables"><section><h4>Prediction references · before decode</h4><table><thead><tr><th>Ref</th><th>Slot</th><th>Picture</th></tr></thead><tbody>${(referenceState?.bindings ?? []).map((entry) => `<tr><td>${entry.reference == null ? summary.showExistingFrame ? "Show" : "Signalled" : `R${entry.reference}`}</td><td>${entry.slot}</td><td>${pictureLink(entry.picture, entry.frameId)}</td></tr>`).join("") || `<tr><td colspan="3">${summary.frameTypeName === "KEY_FRAME" || summary.frameTypeName === "INTRA_ONLY_FRAME" ? "Intra · no temporal references" : "No resolved prediction references"}</td></tr>`}</tbody></table></section><section><h4>Reference slots · after decode</h4><table><thead><tr><th>Slot</th><th>Stored picture</th><th>Refresh</th></tr></thead><tbody>${Array.from({ length: 8 }, (_, slot) => { const picture = referenceState?.after[slot]; return `<tr><td>${slot}</td><td>${picture ? pictureLink(picture, picture.frameId) : "Empty / unknown"}</td><td>${summary.refreshFrameFlags & (1 << slot) ? "Updated" : "—"}</td></tr>`; }).join("")}</tbody></table></section></div></details>`;
+  elements.timeline.after(referenceMap);
+  referenceMap.querySelectorAll("[data-reference-frame]").forEach((button) => button.addEventListener("click", () => selectFrame(Number(button.dataset.referenceFrame))));
   elements.timeline.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const track = elements.timeline.querySelector(".timeline-track");
+  const svg = elements.timeline.querySelector(".timeline-reference-arcs");
+  const drawArrows = () => {
+    if (!track || !svg) return;
+    const bounds = track.getBoundingClientRect();
+    const center = (frameId) => { const rect = elements.timeline.querySelector(`[data-frame-id="${frameId}"]`)?.getBoundingClientRect(); return rect ? rect.left - bounds.left + rect.width / 2 : NaN; };
+    const arcs = timelineReferenceArcs(center(selectedFrame.frameId), targets.map((target) => ({ ...target, x: center(target.frameId) })), bounds.width);
+    svg.setAttribute("viewBox", `0 0 ${bounds.width} 80`);
+    svg.innerHTML = `<defs><marker id="timeline-ref-head" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#8ccef3"/></marker></defs>${arcs.map((arc, index) => `<g><title>F${selectedFrame.decodeIndex} references F${arc.frame.decodeIndex}; slots ${arc.slotIndices.join(", ")}</title><path d="${arc.path}" fill="none" stroke="#8ccef3" stroke-width="1.5" marker-end="url(#timeline-ref-head)"/><text x="${arc.end + 6}" y="${22 + index * 8}" fill="#b8dff6" font-size="10">F${arc.frame.decodeIndex}</text></g>`).join("")}${arcs.length ? "" : `<text x="12" y="25" fill="#a8bbcc" font-size="11">${summary.frameTypeName === "KEY_FRAME" || summary.frameTypeName === "INTRA_ONLY_FRAME" ? "Intra frame · no temporal dependencies" : "No resolved temporal dependencies"}</text>`}`;
+  };
+  const arrowFrame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(drawArrows) : null;
+  const observer = track && typeof ResizeObserver !== "undefined" ? new ResizeObserver(drawArrows) : null;
+  if (observer) observer.observe(track);
+  state.timelineCleanup = () => { observer?.disconnect(); if (arrowFrame != null) cancelAnimationFrame(arrowFrame); };
+}
+
+function referenceStateFor(frameId) {
+  if (!state.report) return null;
+  if (!state.referenceStateCache.has(state.report)) state.referenceStateCache.set(state.report, buildReferenceStateIndex(state.report));
+  return state.referenceStateCache.get(state.report).get(frameId) ?? null;
 }
 
 function obuMatches(obu) {
@@ -2575,15 +2623,14 @@ async function renderFramePreview() {
     const modes = analysisModes(frameOverlay?.blocks ?? [], overlaySupportsFeature);
     let activeMode = modes.find(({ id }) => id === state.analysisMode);
     if (!activeMode?.available) activeMode = modes.find(({ id }) => id === "yuv");
-    state.analysisMode = activeMode.id;
     if (activeMode.id !== "info-overlays" || !["qindex", "quant-delta"].includes(state.overlayLayer)) state.overlayLayer = activeMode.layer;
-    if (activeMode.id === "simple-motion") state.showMotionVectors = true;
     const layerFeatures = { mode: "mode", partition: null, none: null, qindex: "qindex", "quant-delta": "qindex", coefficients: "coefficient", motion: "motion-vector" };
     if (!(state.overlayLayer in layerFeatures) || (layerFeatures[state.overlayLayer] !== null && !overlaySupportsFeature(layerFeatures[state.overlayLayer]))) {
       state.overlayLayer = "partition";
     }
     const layerOption = (value, label) => {
-      const available = layerFeatures[value] === null || overlaySupportsFeature(layerFeatures[value]);
+      const available = (layerFeatures[value] === null || overlaySupportsFeature(layerFeatures[value]))
+        && (value !== "quant-delta" || frameOverlay?.blocks.some((block) => Number.isFinite(block.quantDelta)));
       return `<option value="${value}" ${state.overlayLayer === value ? "selected" : ""} ${available ? "" : "disabled"}>${label}${available ? "" : " (unavailable)"}</option>`;
     };
     let blockStatistics = hasBlocks ? state.blockStatisticsCache.get(frameOverlay.blocks) : null;
@@ -2600,6 +2647,7 @@ async function renderFramePreview() {
     const layerControls = hasBlocks ? `<div class="block-controls">
       <label ${activeMode.id === "info-overlays" ? "" : "hidden"}>Overlay <select id="block-layer">${activeMode.id === "info-overlays" ? `${layerOption("qindex", "QIndex")}${layerOption("quant-delta", "Q delta")}` : layerOption(activeMode.layer, activeMode.label)}</select></label>
       <label><input id="block-borders" type="checkbox" ${state.showBlockBorders ? "checked" : ""}>Block borders</label>
+      <label>Labels <select id="block-labels" ${["mode", "coefficients", "motion"].includes(state.overlayLayer) ? "" : "disabled"}>${[["auto", "Auto"], ["selected", "Selected block"], ["off", "Off"]].map(([value, label]) => `<option value="${value}" ${state.blockLabels === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label class="motion-toggle" title="Show prediction offsets from each block center. Expand Motion vector guide for units and reference colors."><input id="mv-toggle" type="checkbox" ${state.showMotionVectors && hasMotionVectors ? "checked" : ""} ${hasMotionVectors ? "" : "disabled"}>Motion vectors</label>
       </div>${renderMotionVectorGuide()}<details class="analysis-disclosure"${state.blockVisibilityFilter !== "all" ? " open" : ""}><summary>Overlay settings${state.blockVisibilityFilter !== "all" ? ` · Filter: ${escapeHtml(state.blockVisibilityFilter)}` : ""}</summary><div class="block-controls">
       <label>Filter <select id="block-filter">${[
@@ -2607,6 +2655,7 @@ async function renderFramePreview() {
         ["compound", "Compound"], ["motion", "Has MV"], ["coeff", "Non-zero coeff"], ["all-planes", "All planes"],
       ].map(([value, label]) => `<option value="${value}" ${state.blockVisibilityFilter === value ? "selected" : ""} ${blockStatistics.filterCounts[value] === 0 ? "disabled" : ""}>${label} (${blockStatistics.filterCounts[value]})</option>`).join("")}</select></label>
       <label>Overlay opacity <input id="block-opacity" type="range" min="5" max="80" value="${Math.round(state.overlayOpacity * 100)}"></label>
+      <label><input id="dim-analysis-picture" type="checkbox" ${state.dimAnalysisPicture ? "checked" : ""}>Dim picture in analysis modes</label>
       <label>Vectors <select id="mv-component" ${hasMotionVectors ? "" : "disabled"}><option value="all" ${state.motionVectorComponent === "all" ? "selected" : ""}>All</option><option value="primary" ${state.motionVectorComponent === "primary" ? "selected" : ""}>MV 1</option><option value="secondary" ${state.motionVectorComponent === "secondary" ? "selected" : ""}>MV 2</option></select></label>
       <label>MV scale <input id="mv-scale" type="range" min="1" max="16" step="1" value="${state.motionVectorScale}" ${hasMotionVectors ? "" : "disabled"}><output id="mv-scale-value">${state.motionVectorScale}×</output></label>
       <label>MV opacity <input id="mv-opacity" type="range" min="10" max="100" value="${Math.round(state.motionVectorOpacity * 100)}" ${hasMotionVectors ? "" : "disabled"}></label>
@@ -2627,17 +2676,17 @@ async function renderFramePreview() {
     elements.viewportContent.innerHTML = `<div class="frame-preview"><div class="preview-scroll"><div class="preview-stage"><img src="${cached.url}" alt="Frame ${frameId} decoded preview">${grid}${blocks}</div></div><div class="preview-caption"><span>${width}×${height}</span><label class="overlay-toggle"><input id="sb-grid-toggle" type="checkbox" ${state.showSuperblockGrid ? "checked" : ""}> ${sbSize}×${sbSize} SB grid</label></div>${layerControls}<div class="overlay-note">${hasBlocks ? `<span id="block-visible-count">${visibleBlockCount}</span> / ${frameOverlay.blocks.length} blocks visible` : escapeHtml(noBlocksMessage)}</div>${blockStatisticsPanel}</div>`;
     const stage = elements.viewportContent.querySelector(".preview-stage");
     stage.style.aspectRatio = `${width} / ${height}`;
-    stage.style.width = state.previewZoom === "fit" ? `min(100%, ${Math.round(width / height * 600)}px)` : `${width * Number(state.previewZoom)}px`;
-    stage.parentElement.insertAdjacentHTML("beforebegin", `<div class="preview-toolbar"><label>Mode <select id="analysis-mode">${modes.map((mode) => `<option value="${mode.id}" ${mode.id === activeMode.id ? "selected" : ""} ${mode.available ? "" : "disabled"} title="${escapeHtml(mode.note)}">${mode.label}${mode.available ? "" : " — unavailable"}</option>`).join("")}</select></label><label>Zoom <select id="preview-zoom">${[["fit", "Fit"], ["1", "100%"], ["2", "200%"], ["4", "400%"], ["8", "800%"]].map(([value, label]) => `<option value="${value}" ${String(state.previewZoom) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><span>Drag to pan · Click to inspect · Double-click to reset</span></div><p class="mode-description">${escapeHtml(activeMode.note)}</p>`);
+    stage.style.width = state.previewZoom === "fit" ? `min(100%, ${width / height * 65}vh, ${width / height * 600}px)` : `${width * Number(state.previewZoom)}px`;
+    stage.parentElement.insertAdjacentHTML("beforebegin", `<div class="preview-toolbar"><label>Mode <select id="analysis-mode">${modes.map((mode) => `<option value="${mode.id}" ${mode.id === activeMode.id ? "selected" : ""} ${mode.available ? "" : "disabled"} title="${escapeHtml(mode.note)}">${mode.label}${mode.available ? "" : " — unavailable"}</option>`).join("")}</select></label><label>Zoom <select id="preview-zoom">${[["fit", "Fit"], ["1", "100%"], ["2", "200%"], ["4", "400%"], ["8", "800%"]].map(([value, label]) => `<option value="${value}" ${String(state.previewZoom) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button id="preview-reset" class="secondary-button" type="button">Reset view</button><span>Drag to pan · Click to inspect · Double-click to reset</span></div><p class="mode-description">${activeMode.id !== state.analysisMode ? "Requested mode has no data for this frame. Showing the decoded picture. " : ""}${escapeHtml(activeMode.note)}</p>`);
     elements.viewportContent.querySelector("#analysis-mode").addEventListener("change", (event) => {
       const mode = modes.find(({ id }) => id === event.target.value);
       if (!mode?.available) return;
       state.analysisMode = mode.id;
       state.showMotionVectors = mode.id === "simple-motion";
-      state.selectedBlock = null;
+      if (mode.id === "yuv") state.selectedBlock = null;
       renderFramePreview();
       const obu = selectedObu();
-      if (obu) renderInspector(obu, selectedNode(), null);
+      if (obu) renderInspector(obu, selectedNode(), state.selectedBlock);
     });
     elements.viewportContent.querySelector("#preview-zoom").addEventListener("change", (event) => {
       state.previewZoom = event.target.value;
@@ -2648,7 +2697,11 @@ async function renderFramePreview() {
       elements.viewportContent.querySelector(".superblock-grid").classList.toggle("hidden", !state.showSuperblockGrid);
     });
     if (hasBlocks) setupBlockOverlay(frameOverlay.blocks, width, height, hasMotionVectors);
-    state.previewPanCleanup = attachPreviewPan(elements.viewportContent.querySelector(".preview-scroll"));
+    const previewViewport = elements.viewportContent.querySelector(".preview-scroll");
+    previewViewport.tabIndex = 0;
+    previewViewport.setAttribute("aria-label", "Frame viewer. Drag or use arrow keys to pan; Home resets the view.");
+    state.previewPanCleanup = attachPreviewPan(previewViewport, { viewState: state.previewView });
+    elements.viewportContent.querySelector("#preview-reset").addEventListener("click", () => state.previewPanCleanup?.reset());
     elements.viewportContent.querySelector(".frame-preview").insertAdjacentHTML("beforeend", `<details class="analysis-disclosure" id="luma-details"><summary>Luma statistics</summary></details>`);
     const lumaDetails = elements.viewportContent.querySelector("#luma-details");
     lumaDetails.addEventListener("toggle", () => {
@@ -2697,15 +2750,159 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
   if (!canvas) return;
   let visibleBlocks = filterBlockRecords(blocks, state.blockVisibilityFilter);
   let index = new BlockSpatialIndex(visibleBlocks);
+  let hoveredBlock = null;
   try {
     const renderer = new BlockOverlayRenderer(canvas, width, height);
     state.blockRenderer = renderer;
+    updateBlockHighlight(canvas, width, height);
     const legend = document.createElement("div");
     legend.className = "block-layer-legend";
     canvas.closest(".frame-preview").querySelector(".block-controls").after(legend);
+    const annotations = document.createElement("div");
+    annotations.className = "block-annotations";
+    annotations.setAttribute("aria-hidden", "true");
+    canvas.parentElement.append(annotations);
+    const viewport = canvas.closest(".preview-scroll");
+    const sourcePanel = document.createElement("div");
+    sourcePanel.className = "prediction-sources";
+    canvas.closest(".frame-preview").querySelector(".preview-caption").after(sourcePanel);
+    let sourceKey = null, sourceController = null, sourceUrls = [];
+    const clearSources = () => {
+      sourceController?.abort(); sourceController = null;
+      for (const url of sourceUrls) URL.revokeObjectURL(url);
+      sourceUrls = [];
+    };
+    const paintSources = (block) => {
+      const key = state.overlayLayer === "mode" && block ? `${state.selectedFrameId}:${block.blockId}` : null;
+      if (sourceKey === key) return;
+      sourceKey = key; clearSources(); sourcePanel.innerHTML = "";
+      if (!key) return;
+      const sources = blockPredictionSources(block, referenceStateFor(state.selectedFrameId), state.overlay);
+      if (!sources.length) {
+        sourcePanel.innerHTML = `<p>${block.intraMode != null || block.mode === "intra" ? "Intra prediction uses neighbours in this picture, not another frame." : "No motion/reference data for this block."}</p>`;
+        return;
+      }
+      sourceController = new AbortController();
+      const controller = sourceController;
+      const number = (value) => Number(value.toFixed(3));
+      sourcePanel.innerHTML = `<header>Prediction sources · B${block.blockId}<small>Solid box: nominal MV source area. May overlap several coding blocks; interpolation and warping are not reconstructed.</small></header>${sources.map((source) => {
+        const { picture, region } = source;
+        const refWidth = picture?.summary.frameWidth, refHeight = picture?.summary.frameHeight;
+        const crop = region ? `${region.x - Math.max(16, region.width / 2)} ${region.y - Math.max(16, region.height / 2)} ${region.width + Math.max(32, region.width)} ${region.height + Math.max(32, region.height)}` : null;
+        return `<section class="prediction-source-card"><h4>MV${source.index + 1} · R${source.reference ?? "?"} → Slot ${source.slot ?? "?"} → ${picture ? `F${picture.frameId} / OBU ${picture.obuId ?? "?"}${picture.hidden ? " (hidden)" : ""}` : "Unresolved"}</h4>${region ? `<svg class="reference-picture" data-source-view="${source.index}" viewBox="${crop}" aria-label="Reference picture and source area"><image data-reference-image width="${refWidth}" height="${refHeight}"/><rect x="${block.x}" y="${block.y}" width="${block.width}" height="${block.height}" fill="none" stroke="#fff" stroke-dasharray="3 2" stroke-width="1" vector-effect="non-scaling-stroke"/><line x1="${block.x + block.width / 2}" y1="${block.y + block.height / 2}" x2="${region.x + region.width / 2}" y2="${region.y + region.height / 2}" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/><rect x="${region.x}" y="${region.y}" width="${region.width}" height="${region.height}" fill="#ffbf6930" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div class="source-actions"><button type="button" data-source-full="${source.index}">Full reference</button>${picture.previewFrameId != null ? `<button type="button" data-source-jump="${picture.previewFrameId}">Open frame ${picture.previewFrameId}</button>` : ""}</div><p>Source (${number(region.x)}, ${number(region.y)}) · ${region.width}×${region.height} · Δ (${number(source.mv.x)}, ${number(source.mv.y)}) px</p><p>${source.overlaps.length ? `Overlaps ${source.overlaps.slice(0, 12).map((entry) => `B${entry.blockId}`).join(", ")}${source.overlaps.length > 12 ? ` +${source.overlaps.length - 12} more` : ""}` : picture.hidden ? "Hidden-picture coding block IDs unavailable" : "No overlapping coding block records"}</p><small data-source-status="${source.index}">${picture.previewFrameId == null ? "Decoded preview of this hidden picture is unavailable" : "Loading reference picture…"}</small>` : `<p>${escapeHtml(source.reason)}</p>`}</section>`;
+      }).join("")}`;
+      sourcePanel.querySelectorAll("[data-source-full]").forEach((button) => button.addEventListener("click", () => {
+        const source = sources[Number(button.dataset.sourceFull)];
+        const { region } = source;
+        const full = button.dataset.expanded !== "true";
+        button.dataset.expanded = String(full);
+        button.textContent = full ? "Zoom source" : "Full reference";
+        sourcePanel.querySelector(`[data-source-view="${source.index}"]`)?.setAttribute("viewBox", full ? `0 0 ${source.picture.summary.frameWidth} ${source.picture.summary.frameHeight}` : `${region.x - Math.max(16, region.width / 2)} ${region.y - Math.max(16, region.height / 2)} ${region.width + Math.max(32, region.width)} ${region.height + Math.max(32, region.height)}`);
+      }));
+      sourcePanel.querySelectorAll("[data-source-jump]").forEach((button) => button.addEventListener("click", () => selectFrame(Number(button.dataset.sourceJump))));
+      for (const source of sources) {
+        if (!source.region || source.picture?.previewFrameId == null) continue;
+        const previewId = source.picture.previewFrameId;
+        (async () => {
+          try {
+            let url = state.previews.get(previewId)?.status === "ready" ? state.previews.get(previewId).url : null;
+            if (!url) {
+              const response = await fetch(`/api/preview?frame=${previewId}`, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: state.bytes, signal: controller.signal });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              const blob = await response.blob();
+              if (controller.signal.aborted) return;
+              url = URL.createObjectURL(blob); sourceUrls.push(url);
+            }
+            if (controller.signal.aborted) return;
+            sourcePanel.querySelector(`[data-source-view="${source.index}"]`)?.querySelector("[data-reference-image]")?.setAttribute("href", url);
+            const status = sourcePanel.querySelector(`[data-source-status="${source.index}"]`);
+            if (status) status.textContent = "Dashed: current coordinates · Solid: source footprint";
+          } catch (error) {
+            if (controller.signal.aborted) return;
+            const status = sourcePanel.querySelector(`[data-source-status="${source.index}"]`);
+            if (status) status.textContent = `Reference preview unavailable: ${error.message}`;
+          }
+        })();
+      }
+    };
+    const readout = document.createElement("div");
+    readout.className = "block-image-readout";
+    readout.setAttribute("role", "status");
+    readout.setAttribute("aria-live", "polite");
+    viewport.append(readout);
+    const paintLabels = () => {
+      if (state.blockRenderer !== renderer) return;
+      const enabled = ["mode", "coefficients", "motion"].includes(state.overlayLayer);
+      canvas.parentElement.classList.toggle("analysis-emphasis", enabled && state.dimAnalysisPicture);
+      const labelControl = elements.viewportContent.querySelector("#block-labels");
+      if (labelControl) labelControl.disabled = !enabled;
+      const bounds = canvas.getBoundingClientRect();
+      const options = {
+        layer: state.overlayLayer, width, height, bounds,
+        viewport: viewport.getBoundingClientRect?.() ?? bounds,
+        selectedBlockId: state.selectedBlock?.blockId, labels: state.blockLabels,
+        component: state.motionVectorComponent, minimumMagnitudePixels: state.motionVectorMinimumMagnitude,
+        referenceState: referenceStateFor(state.selectedFrameId),
+        showMotionVectors: state.showMotionVectors && motionVectorsAvailable,
+      };
+      const labels = layoutBlockAnnotations(visibleBlocks, options);
+      paintBlockAnnotationElements(annotations, labels, document);
+      paintSources(visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : null);
+      readout.hidden = !enabled || state.blockLabels === "off";
+      if (readout.hidden) { readout.innerHTML = ""; return; }
+      const heading = { mode: "Predictions · base modes", coefficients: "Residuals · coefficient activity", motion: "Motion · prediction offsets" }[state.overlayLayer];
+      const key = { mode: "INTRA / INTER · BI = compound · V/H = vertical/horizontal · SM = Smooth · PTH = Paeth", coefficients: "NZ = non-zero coefficients · % = count / block area", motion: `R = reference identifier · (Δx, Δy) in pixels · Arrows ×${state.motionVectorScale}` }[state.overlayLayer];
+      const selected = visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : visibleBlocks.includes(hoveredBlock) ? hoveredBlock : null;
+      const content = selected && blockAnnotationContent(selected, state.overlayLayer, options);
+      if (content && state.overlayLayer === "mode") {
+        for (const source of blockPredictionSources(selected, options.referenceState, state.overlay)) {
+          content.detail.push(`MV${source.index + 1} R${source.reference ?? "?"} → Slot ${source.slot ?? "?"} → ${source.picture ? `F${source.picture.frameId} / OBU ${source.picture.obuId ?? "?"}` : "Unresolved"}${source.region ? ` · source (${Number(source.region.x.toFixed(3))}, ${Number(source.region.y.toFixed(3))})` : ""}`);
+        }
+      }
+      const markup = `<strong>${heading}</strong><span>${key}</span>${content ? `<div class="selected-block-readout"><b>${selected === state.selectedBlock ? "Selected" : "Hover"} B${selected.blockId} · ${selected.width}×${selected.height} · (${selected.x}, ${selected.y}) · ${escapeHtml(["Y", "U", "V"][selected.plane ?? 0] ?? selected.plane)}</b>${content.detail.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : `<small>${labels.length} / ${visibleBlocks.length} block labels · Hover to read · Click to pin · Zoom for more labels</small>`}`;
+      if (readout.innerHTML !== markup) readout.innerHTML = markup;
+    };
+    let labelFrame = null;
+    const scheduleLabels = (event) => {
+      if (event?.type === "pointermove" && !event.buttons) return;
+      if (labelFrame !== null) return;
+      labelFrame = requestAnimationFrame(() => { labelFrame = null; paintLabels(); });
+    };
+    // Pan transforms do not trigger ResizeObserver. Repack after movement so
+    // labels entering the viewport are never starved by the DOM label limit.
+    const labelEvents = ["pointermove", "pointerup", "keydown", "dblclick", "scroll"];
+    for (const event of labelEvents) viewport.addEventListener(event, scheduleLabels);
+    const resetControl = elements.viewportContent.querySelector("#preview-reset");
+    resetControl?.addEventListener("click", scheduleLabels);
+    const hover = (event) => {
+      if (event.buttons || state.selectedBlock) return;
+      const point = sourcePointFromClient(canvas.getBoundingClientRect(), event.clientX, event.clientY, width, height);
+      const block = point ? index.pick(point.x, point.y) : null;
+      if (block !== hoveredBlock) { hoveredBlock = block; paintLabels(); }
+    };
+    const leave = () => { if (hoveredBlock) { hoveredBlock = null; paintLabels(); } };
+    canvas.addEventListener("pointermove", hover);
+    canvas.addEventListener("pointerleave", leave);
+    state.blockAnnotationCleanup = () => {
+      for (const event of labelEvents) viewport.removeEventListener(event, scheduleLabels);
+      resetControl?.removeEventListener("click", scheduleLabels);
+      canvas.removeEventListener("pointermove", hover);
+      canvas.removeEventListener("pointerleave", leave);
+      if (labelFrame !== null) cancelAnimationFrame(labelFrame);
+      annotations.remove();
+      readout.remove();
+      clearSources(); sourcePanel.remove();
+    };
     const paint = () => {
       if (state.blockRenderer !== renderer) return;
-      legend.innerHTML = blockLayerLegend(state.overlayLayer).map(({ label, color }) => `<span>${color ? `<i style="background:${color}"></i>` : ""}${escapeHtml(label)}</span>`).join("");
+      legend.innerHTML = "";
+      for (const { label, color } of blockLayerLegend(state.overlayLayer)) {
+        const item = document.createElement("span");
+        item.textContent = label;
+        if (color) { const swatch = document.createElement("i"); swatch.style.background = color; item.append(swatch); }
+        legend.append(item);
+      }
+      paintLabels();
       const borders = elements.viewportContent.querySelector("#block-borders");
       borders.disabled = ["partition", "none", "motion"].includes(state.overlayLayer);
       borders.checked = state.overlayLayer === "partition" || (!["none", "motion"].includes(state.overlayLayer) && state.showBlockBorders);
@@ -2745,6 +2942,14 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
     elements.viewportContent.querySelector("#block-opacity").addEventListener("input", (event) => {
       state.overlayOpacity = Number(event.target.value) / 100;
       paint();
+    });
+    elements.viewportContent.querySelector("#block-labels")?.addEventListener("change", (event) => {
+      state.blockLabels = event.target.value;
+      paintLabels();
+    });
+    elements.viewportContent.querySelector("#dim-analysis-picture")?.addEventListener("change", (event) => {
+      state.dimAnalysisPicture = event.target.checked;
+      paintLabels();
     });
     elements.viewportContent.querySelector("#block-filter")?.addEventListener("change", (event) => {
       state.blockVisibilityFilter = event.target.value;
@@ -2791,18 +2996,7 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       if (!point) return;
       const { x, y } = point;
       state.selectedBlock = index.pick(x, y);
-      const oldHighlight = elements.viewportContent.querySelector(".block-selection");
-      oldHighlight?.remove();
-      if (state.selectedBlock) {
-        const highlight = document.createElement("div");
-        highlight.className = "block-selection";
-        highlight.setAttribute("aria-hidden", "true");
-        highlight.style.left = `${state.selectedBlock.x / width * 100}%`;
-        highlight.style.top = `${state.selectedBlock.y / height * 100}%`;
-        highlight.style.width = `${state.selectedBlock.width / width * 100}%`;
-        highlight.style.height = `${state.selectedBlock.height / height * 100}%`;
-        canvas.parentElement.append(highlight);
-      }
+      updateBlockHighlight(canvas, width, height);
       paint();
       const obu = selectedObu();
       if (obu) {
@@ -2818,6 +3012,19 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       textContent: `Block rendering failed: ${error.message}`,
     }));
   }
+}
+
+function updateBlockHighlight(canvas, width, height) {
+  elements.viewportContent.querySelector(".block-selection")?.remove();
+  if (!state.selectedBlock || state.overlayLayer === "none") return;
+  const highlight = document.createElement("div");
+  highlight.className = "block-selection";
+  highlight.setAttribute("aria-hidden", "true");
+  highlight.style.left = `${state.selectedBlock.x / width * 100}%`;
+  highlight.style.top = `${state.selectedBlock.y / height * 100}%`;
+  highlight.style.width = `${state.selectedBlock.width / width * 100}%`;
+  highlight.style.height = `${state.selectedBlock.height / height * 100}%`;
+  canvas.parentElement.append(highlight);
 }
 
 async function renderLumaStats(frameId) {
@@ -2922,13 +3129,14 @@ function renderInspector(obu, node, block = null) {
     html = `<div class="inspector-title"><span>Block record</span><h3>Block ${block.blockId} · ${block.width}×${block.height}</h3></div><section class="property-group"><h4>Geometry & coding</h4>${propertyRows([
       ["Position", `${block.x}, ${block.y}`, true], ["Plane", String(block.plane)],
       ["Partition", unavailableInspectionValue("partition", block.partition)], ["Segment", block.segmentId], ["Skip", String(block.skip)],
-      ["Mode", unavailableInspectionValue("mode", block.mode)], ["Intra mode", unavailableInspectionValue("mode", block.intraMode)], ["Inter mode", unavailableInspectionValue("mode", block.interMode)],
+      ["Mode", unavailableInspectionValue("mode", block.mode)], ["Intra mode", block.intraMode == null ? null : intraPredictionName(block.intraMode)], ["Inter mode", unavailableInspectionValue("mode", block.interMode)],
       ["MI position", block.miRow === null || block.miRow === undefined
         ? "—" : `${block.miColumn}, ${block.miRow}`],
       ["Reference slots", block.refs.join(", ") || "—"], ["Motion vectors", unavailableInspectionValue("motion-vector", vectors)],
       ["Compound type", block.compoundType], ["Q index", unavailableInspectionValue("qindex", block.qindex)],
       ["Q delta", unavailableInspectionValue("qindex", block.quantDelta)], ["Transform size", unavailableInspectionValue("transform", block.txSize)], ["Transform type", unavailableInspectionValue("transform", block.txType)],
       ["Non-zero coeffs", unavailableInspectionValue("coefficient", block.coeffNonZero)], ["Filter", unavailableInspectionValue("filter", block.filter)],
+      ["Coeff count / block area", coefficientDensity(block) === null ? null : `${(coefficientDensity(block) * 100).toFixed(2)}%`],
     ])}</section><section class="property-group"><h4>Inspection provenance</h4>${propertyRows([
       ["Producer", state.overlay?.provenance?.producer ?? "external"],
       ["Build", state.overlay?.provenance?.build ?? "—"],

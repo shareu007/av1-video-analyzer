@@ -79,3 +79,54 @@ test("cancel and cleanup release panning state", () => {
   assert.equal(viewport.released, 1);
   cleanup();
 });
+
+test("the observed image point survives stage replacement, zoom and viewport resizing", () => {
+  const viewport = new FakeViewport();
+  viewport.clientWidth = 400;
+  viewport.clientHeight = 300;
+  viewport.getBoundingClientRect = () => ({ left: 100, top: 50 });
+  let width = 256;
+  let height = 128;
+  const stage = { style: { translate: "" }, getBoundingClientRect() {
+    const [x, y] = this.style.translate.split(" ").map((part) => Number.parseFloat(part) || 0);
+    return { left: 100 + Math.max(0, (viewport.clientWidth - width) / 2) + x,
+      top: 50 + y, width, height };
+  } };
+  viewport.querySelector = () => stage;
+  const viewState = {};
+  let cleanup = attachPreviewPan(viewport, { viewState });
+  viewport.emit("pointerdown", pointer(200, 150));
+  viewport.emit("pointermove", pointer(260, 120));
+  viewport.emit("pointerup", pointer(260, 120));
+  const center = { ...viewState.center };
+  assert.equal(center.x, 0.5 - 60 / 256);
+  assert.equal(center.y, 0.5 + 30 / 128);
+  cleanup();
+  width = 1024;
+  height = 512;
+  viewport.clientWidth = 500;
+  cleanup = attachPreviewPan(viewport, { viewState });
+  const picture = stage.getBoundingClientRect();
+  assert.equal((350 - picture.left) / width, center.x);
+  assert.equal((200 - picture.top) / height, center.y);
+  cleanup.reset();
+  assert.deepEqual(viewState.center, { x: 0.5, y: 0.5 });
+  assert.equal(stage.getBoundingClientRect().left + width / 2, 350);
+  cleanup();
+});
+
+test("keyboard panning is limited to the focused viewport and Home resets it", () => {
+  const viewport = new FakeViewport();
+  const stage = { style: { translate: "" } };
+  viewport.querySelector = () => stage;
+  const cleanup = attachPreviewPan(viewport);
+  viewport.emit("keydown", { target: {}, key: "ArrowLeft" });
+  assert.equal(stage.style.translate, "0px 0px");
+  viewport.emit("keydown", { target: viewport, key: "ArrowLeft" });
+  assert.equal(stage.style.translate, "40px 0px");
+  viewport.emit("keydown", { target: viewport, key: "ArrowUp" });
+  assert.equal(stage.style.translate, "40px 40px");
+  viewport.emit("keydown", { target: viewport, key: "Home" });
+  assert.equal(stage.style.translate, "0px 0px");
+  cleanup();
+});
