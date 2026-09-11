@@ -22,7 +22,7 @@ async function client(fetch, crypto = webcrypto) {
     style = {};
     set innerHTML(value) {
       this.markup = value;
-      this.children = [...value.matchAll(/<(button|details)\b([^>]*)>/g)].map(([, tag, attributes]) => {
+      this.children = [...value.matchAll(/<(button|details|output)\b([^>]*)>/g)].map(([, tag, attributes]) => {
         const child = new Element();
         for (const [, key, value] of attributes.matchAll(/([\w-]+)="([^"]*)"/g)) {
           child.attributes.set(key, value);
@@ -198,7 +198,14 @@ async function multiFrameClient(count = 3) {
 test("reference tables and timeline arcs use real frame targets and slot mappings", async () => {
   const { app, elements, context } = await multiFrameClient();
   app.state.selectedFrameId = 2;
-  context.referenceStateFor = () => ({ summary: { referenceFrameIds: [0, 1, 0], referenceSlotIndices: [0, 1, 2] }, bindings: [{ reference: 1, slot: 0, frameId: 0 }, { reference: 2, slot: 1, frameId: 1 }], after: Array(8).fill(null) });
+  const picture0 = { frameId: 0, obuId: 2, previewFrameId: 0 }, picture1 = { frameId: 1, obuId: 4, previewFrameId: 1 };
+  const slots = [picture0, picture1, ...Array(6).fill(null)];
+  context.referenceStateFor = () => ({ frameId: 2, picture: { frameId: 2, obuId: 9, hidden: false }, summary: { refreshFrameFlags: 0, referenceFrameIds: [0, 1, 0], referenceSlotIndices: [0, 1, 0] }, bindings: [
+    { reference: 1, slot: 0, frameId: 0, picture: picture0 },
+    { reference: 2, slot: 1, frameId: 1, picture: picture1 },
+    { reference: 3, slot: 0, frameId: 0, picture: picture0 },
+  ], before: slots, after: slots.slice() });
+  app.state.overlay = { frames: [{ frameId: 2, blocks: [{ mode: "inter", refs: [1] }, { mode: "intra" }] }] };
   const timeline = elements.get("timeline");
   const track = new timeline.constructor(), svg = new timeline.constructor();
   track.getBoundingClientRect = () => ({ left: 20, width: 270 });
@@ -215,13 +222,175 @@ test("reference tables and timeline arcs use real frame targets and slot mapping
   vm.runInContext("renderTimeline()", context);
   const map = elements.get("timeline").nextSibling;
   assert.equal(map.querySelectorAll("[data-reference-frame]").length, 2);
-  assert.match(map.innerHTML, /Prediction references · before decode/);
-  assert.match(map.innerHTML, /Reference slots · after decode/);
+  assert.match(map.innerHTML, /Named references · 7 fixed entries/);
+  assert.match(map.innerHTML, /DPB · 8 storage slots/);
+  assert.equal((map.innerHTML.match(/data-named-reference=/g) ?? []).length, 7);
+  assert.equal(map.querySelectorAll("[data-dpb-slot]").length, 8);
+  assert.match(map.innerHTML, /GOLDEN_FRAME/);
+  assert.match(map.innerHTML, /Before decode<\/th><th>After decode/);
+  assert.match(map.innerHTML, /Viewing Frame 2 · shown picture/);
+  assert.match(map.innerHTML, /Usage: 1 inter \/ 2 luma blocks/);
+  assert.match(map.innerHTML, /0 · unused/);
+  assert.match(map.innerHTML, /Header OBU 2/);
   assert.match(svg.innerHTML, /M 223 2 L 223 18 L 43 18 L 43 2/);
   assert.equal((svg.innerHTML.match(/marker-end=/g) ?? []).length, 2);
+  assert.match(svg.innerHTML, /Frame 0 · shown picture: used by blocks/);
+  assert.match(svg.innerHTML, /Frame 1 · shown picture: unused candidate/);
+  assert.equal((svg.innerHTML.match(/stroke-dasharray=/g) ?? []).length, 1);
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /LAST_FRAME \/ LAST3_FRAME → DPB\[0\] → Frame 0 · shown picture/);
+  await map.querySelector('[data-reference-binding="2"]').dispatch("click");
+  assert.equal(map.querySelector('[data-dpb-slot="1"]').attributes.get("aria-pressed"), "true");
+  assert.equal(map.querySelector('[data-reference-binding="1"]').attributes.get("aria-pressed"), "false");
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /LAST2_FRAME → DPB\[1\]/);
+  await map.querySelector('[data-dpb-slot="0"]').dispatch("click");
+  assert.equal(map.querySelector('[data-reference-binding="1"]').attributes.get("aria-pressed"), "true");
+  assert.equal(map.querySelector('[data-reference-binding="3"]').attributes.get("aria-pressed"), "true");
   vm.runInContext("selectFrame = (id) => { window.referenceClicked = id; }", context);
   await map.querySelector('[data-reference-frame="1"]').dispatch("click");
   assert.equal(context.window.referenceClicked, 1);
+});
+
+test("F3 highlights LAST and BWDREF usage simultaneously and splits their shared packet arrows", async () => {
+  const { app, elements, context } = await multiFrameClient(4);
+  app.state.selectedFrameId = 3;
+  const key = { frameId: 0, obuId: 2, previewFrameId: 0 };
+  const hidden = (hiddenIndex, obuId) => ({ frameId: 1, obuId, hidden: true, hiddenIndex, previewFrameId: null });
+  const h1 = hidden(1, 4), h2 = hidden(2, 5), h3 = hidden(3, 6);
+  const before = [h1, key, key, h2, key, h3, key, key];
+  const slots = [5, 2, 5, 5, 3, 0, 3];
+  const refs = slots.map((slot, index) => ({ reference: index + 1, slot, frameId: before[slot].frameId, picture: before[slot] }));
+  context.referenceStateFor = () => ({ frameId: 3, picture: { frameId: 3, obuId: 11 },
+    summary: { frameTypeName: "INTER_FRAME", refreshFrameFlags: 0, referenceFrameIds: refs.map((ref) => ref.frameId), referenceSlotIndices: slots },
+    bindings: refs, before, after: before.slice() });
+  const blocks = [...Array.from({ length: 4 }, () => ({ mode: "inter", refs: [1, 5] })),
+    ...Array.from({ length: 6 }, () => ({ mode: "inter", refs: [1] })),
+    ...Array.from({ length: 21 }, () => ({ mode: "inter", refs: [5] }))];
+  app.state.overlay = { frames: [{ frameId: 3, blocks }] };
+  const timeline = elements.get("timeline"), track = new timeline.constructor(), svg = new timeline.constructor();
+  track.getBoundingClientRect = () => ({ left: 0, width: 360 });
+  const originalQuery = timeline.querySelector.bind(timeline);
+  timeline.querySelector = (selector) => {
+    if (selector === ".timeline-track") return track;
+    if (selector === ".timeline-reference-arcs") return svg;
+    const result = originalQuery(selector);
+    if (result) result.getBoundingClientRect = () => ({ left: Number(result.dataset.frameId) * 90, width: 86 });
+    return result;
+  };
+  context.requestAnimationFrame = (callback) => { callback(); return 1; };
+  context.cancelAnimationFrame = () => {};
+  vm.runInContext("renderTimeline()", context);
+  const map = elements.get("timeline").nextSibling;
+  const row = (attribute, id) => map.innerHTML.match(new RegExp(`<tr ${attribute}="${id}"[\\s\\S]*?<\\/tr>`))[0];
+  assert.match(row("data-named-reference", 1), /reference-used reference-forward/);
+  assert.match(row("data-named-reference", 1), /10<small[^>]*>FWD · used/);
+  assert.match(row("data-named-reference", 5), /reference-used reference-backward/);
+  assert.match(row("data-named-reference", 5), /25<small[^>]*>BWD · used/);
+  assert.match(row("data-dpb-row", 5), /reference-used reference-forward/);
+  assert.match(row("data-dpb-row", 3), /reference-used reference-backward/);
+  for (const ref of [2, 3, 4, 6, 7]) assert.doesNotMatch(row("data-named-reference", ref), /reference-used/);
+  assert.doesNotMatch(row("data-dpb-row", 2), /reference-used/);
+  assert.match(map.innerHTML, /Dashed outline = selected mapping, not block usage/);
+  const forward = svg.innerHTML.match(/<g data-reference-direction="forward" data-reference-target="1">[\s\S]*?<\/g>/)[0];
+  const backward = svg.innerHTML.match(/<g data-reference-direction="backward" data-reference-target="1">[\s\S]*?<\/g>/)[0];
+  assert.match(forward, /used by blocks[\s\S]*var\(--reference-forward\)[\s\S]*F1 · FWD/);
+  assert.match(backward, /used by blocks[\s\S]*var\(--reference-backward\)[\s\S]*F1 · BWD/);
+  assert.doesNotMatch(forward + backward, /stroke-dasharray/);
+  // Separate arrowheads keep the orange head from covering the blue one.
+  assert.notEqual(forward.match(/<text x="([^"]+)"/)[1], backward.match(/<text x="([^"]+)"/)[1]);
+  assert.equal((svg.innerHTML.match(/marker-end=/g) ?? []).length, 3);
+  assert.match(timeline.querySelector('[data-frame-id="1"]').attributes.get("class"), /reference-mixed/);
+  await map.querySelector('[data-reference-binding="5"]').dispatch("click");
+  assert.equal(map.querySelector('[data-dpb-slot="3"]').attributes.get("aria-pressed"), "true");
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /^Selected mapping: BWDREF_FRAME \/ ALTREF_FRAME/);
+  assert.match(row("data-named-reference", 1), /reference-used reference-forward/);
+  assert.match(row("data-named-reference", 5), /reference-used reference-backward/);
+  await map.querySelector('[data-reference-binding="3"]').dispatch("click");
+  assert.equal(map.querySelector('[data-reference-binding="3"]').attributes.get("aria-pressed"), "true");
+  assert.doesNotMatch(row("data-named-reference", 3), /reference-used/);
+});
+
+test("reference usage styling keeps direction colours independent of selection", async () => {
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const forward = css.match(/--reference-forward:\s*([^;]+);/)[1];
+  const backward = css.match(/--reference-backward:\s*([^;]+);/)[1];
+  assert.notEqual(forward, backward);
+  const selection = css.match(/\.reference-tables \.dpb-linked\s*\{([^}]+)\}/)[1];
+  assert.match(selection, /outline: 1px dashed/);
+  assert.doesNotMatch(selection, /background|box-shadow|--reference-color/);
+  assert.match(css, /\[data-named-reference\]\.reference-used > td/);
+  assert.match(css, /\[data-dpb-row\]\.reference-used > td:nth-child\(-n\+2\)/);
+});
+
+test("hidden reference links open the exact picture and unavailable usage never becomes unused", async () => {
+  const { app, elements, context } = await multiFrameClient(9);
+  app.state.selectedFrameId = 5;
+  const hidden = { frameId: 5, obuId: 15, hidden: true, hiddenIndex: 1, previewFrameId: 6 };
+  const unshown = { frameId: 1, obuId: 4, hidden: true, hiddenIndex: 1, previewFrameId: null };
+  const slots = [unshown, null, null, null, null, hidden, null, null];
+  const referenceState = { frameId: 5, picture: { frameId: 5, obuId: 16, hidden: false }, packetPictures: [hidden],
+    summary: { refreshFrameFlags: 0, referenceFrameIds: [5, 1], referenceSlotIndices: [5, 0] }, bindings: [
+      { reference: 5, slot: 5, frameId: 5, picture: hidden }, { reference: 6, slot: 0, frameId: 1, picture: unshown },
+    ], before: slots, after: slots.slice() };
+  context.referenceStateFor = () => referenceState;
+  vm.runInContext("renderTimeline()", context);
+  let map = elements.get("timeline").nextSibling;
+  assert.match(map.innerHTML, /Frame 5 · hidden picture 1/);
+  assert.match(map.innerHTML, /Header OBU 15 · same packet, different picture/);
+  assert.match(map.innerHTML, /View in F6/);
+  assert.match(map.innerHTML, /Preview unavailable/);
+  assert.equal(map.querySelectorAll("[data-reference-frame]").length, 1);
+  assert.equal(map.querySelector('[data-reference-frame="5"]'), null);
+  assert.match(map.innerHTML, /Block usage unavailable/);
+  assert.doesNotMatch(map.innerHTML, /0 · unused/);
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /BWDREF_FRAME → DPB\[5\] → Frame 5 · hidden picture 1/);
+  vm.runInContext("selectFrame = (id) => { window.referenceClicked = id; }", context);
+  await map.querySelector('[data-reference-frame="6"]').dispatch("click");
+  assert.equal(context.window.referenceClicked, 6);
+
+  app.state.overlay = { frames: [{ frameId: 5, blocks: [{ mode: "inter", refs: [5] }, { mode: "inter", refs: [] }] }] };
+  vm.runInContext("renderTimeline()", context);
+  map = elements.get("timeline").nextSibling;
+  assert.match(map.innerHTML, /≥1/);
+  assert.match(map.innerHTML, /1 blocks have unknown reference usage/);
+  assert.doesNotMatch(map.innerHTML, /0 · unused/);
+
+  referenceState.summary.showExistingFrame = 1;
+  referenceState.summary.frameToShowMapIdx = 5;
+  referenceState.picture = hidden;
+  vm.runInContext("renderTimeline()", context);
+  map = elements.get("timeline").nextSibling;
+  assert.match(map.innerHTML, /Display source · no new prediction/);
+  assert.match(map.innerHTML, /no new picture is coded/);
+  assert.doesNotMatch(map.innerHTML, /0 · unused|Usage:/);
+  assert.equal((map.innerHTML.match(/data-named-reference=/g) ?? []).length, 7);
+  assert.equal(map.querySelectorAll("[data-reference-binding]").length, 0);
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /Display source \(show_existing_frame\) → DPB\[5\]/);
+});
+
+test("DPB table keeps before-decode pointers separate from refreshed storage", async () => {
+  const { app, elements, context } = await multiFrameClient(6);
+  app.state.selectedFrameId = 5;
+  const old = { frameId: 1, obuId: 5, hidden: true, hiddenIndex: 2, previewFrameId: 4 };
+  const current = { frameId: 5, obuId: 16, hidden: false, previewFrameId: 5 };
+  const before = Array(8).fill(old), after = before.slice();
+  after[3] = current;
+  context.referenceStateFor = () => ({ frameId: 5, picture: current, summary: { refreshFrameFlags: 8 },
+    bindings: [{ reference: 4, slot: 3, frameId: 1, picture: old }], before, after });
+  vm.runInContext("renderTimeline()", context);
+  let map = elements.get("timeline").nextSibling;
+  const updatedRow = map.innerHTML.match(/<tr data-dpb-row="3"[\s\S]*?<\/tr>/)[0];
+  assert.match(updatedRow, /dpb-refreshed/);
+  assert.match(updatedRow, /F1·H2[\s\S]*Updated[\s\S]*F5·shown/);
+  assert.match(map.querySelector("[data-dpb-focus]").textContent, /GOLDEN_FRAME → DPB\[3\] → Frame 1 · hidden picture 2 \(before decode\)/);
+  assert.doesNotMatch(map.querySelector("[data-dpb-focus]").textContent, /Frame 5/);
+  assert.equal((map.innerHTML.match(/dpb-unchanged/g) ?? []).length, 7);
+
+  context.referenceStateFor = () => ({ frameId: 5, picture: current, summary: { frameTypeName: "KEY_FRAME", refreshFrameFlags: 255 }, bindings: [], before: Array(8).fill(null), after: Array(8).fill(current) });
+  vm.runInContext("renderTimeline()", context);
+  map = elements.get("timeline").nextSibling;
+  assert.equal((map.innerHTML.match(/data-named-reference=/g) ?? []).length, 7);
+  assert.equal(map.querySelectorAll("[data-reference-binding]").length, 0);
+  assert.equal((map.innerHTML.match(/dpb-refreshed/g) ?? []).length, 8);
 });
 
 test("frame navigation keeps the selected OBU and structure scope synchronized", async () => {
@@ -389,7 +558,8 @@ test("block layer controls redraw, preserve explicit boundaries and clean up res
   app.state.overlay = { frames: [{ frameId: 0, blocks: [{ blockId: 100, x: 0, y: 0, width: 128, height: 128, plane: 0 }] }] };
   await canvas.dispatch("click", { clientX: 80, clientY: 20 });
   const sources = node(".preview-caption").nextSibling;
-  assert.match(sources.innerHTML, /R2 → Slot 0 → F0 \/ OBU 2/);
+  assert.match(sources.innerHTML, /Predictor 1 ← Frame 0 · shown picture/);
+  assert.match(sources.innerHTML, /R2 → cache slot 0 · header OBU 2/);
   assert.match(sources.innerHTML, /Source \(28, 2\)/);
   assert.match(sources.innerHTML, /Overlaps B100/);
   assert.doesNotMatch(sources.innerHTML, /style=/);

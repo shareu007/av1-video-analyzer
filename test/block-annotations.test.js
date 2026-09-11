@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { blockAnnotationContent, layoutBlockAnnotations, paintBlockAnnotationElements } from "../public/block-annotations.js";
+import { buildReferenceStateIndex } from "../public/reference-state.js";
 
 function documentMock() {
   const createElement = (tag) => ({ tagName: tag, style: {}, children: [], className: "", textContent: "", append(...nodes) { this.children.push(...nodes); } });
@@ -16,6 +17,29 @@ test("mode annotations distinguish intra DC/V and skip", () => {
   assert.match(dc.lines[0], /DC/);
   assert.match(vertical.lines[0], /↕ V|Vertical/);
   assert.match(skip.lines.join(" "), /Transform skipped/);
+});
+
+test("mode annotation keeps same-packet source INTER and labels the referenced picture", () => {
+  const obu = (obuId, frameId, summary) => ({ obuId, frameId, type: { code: 3 }, frameHeaderSummary: summary });
+  const state = buildReferenceStateIndex({ obus: [
+    obu(50, 5, { frameTypeName: "KEY_FRAME", showFrame: 0, refreshFrameFlags: 1, frameWidth: 64, frameHeight: 64, referenceSlotIndices: [], referenceFrameIds: [] }),
+    obu(51, 5, { frameTypeName: "INTER_FRAME", showFrame: 0, refreshFrameFlags: 16, frameWidth: 64, frameHeight: 64, referenceSlotIndices: [0], referenceFrameIds: [5] }),
+    obu(52, 5, { frameTypeName: "INTER_FRAME", showFrame: 1, refreshFrameFlags: 0, frameWidth: 64, frameHeight: 64, referenceSlotIndices: [0, 4, 0, 0, 4, 0, 0], referenceFrameIds: [5, 5, 5, 5, 5, 5, 5] }),
+  ] }).get(5);
+  const content = blockAnnotationContent({ mode: "inter", refs: [1], interMode: "NEAREST" }, "mode", { referenceState: state });
+  assert.equal(content.lines[0], "INTER ← F5·H1");
+  assert.match(content.lines[1], /Same packet/);
+  assert.match(content.detail.join(" "), /still INTER/);
+  assert.equal(state.picture.obuId, 52);
+  const compound = blockAnnotationContent({ mode: "inter", refs: [1, 5] }, "mode", { referenceState: state });
+  assert.equal(compound.lines[0], "INTER ← F5·H1 + F5·H2");
+  assert.equal(compound.compact, "BI");
+  const alias = blockAnnotationContent({ mode: "inter", refs: [1, 3] }, "mode", { referenceState: state });
+  assert.equal(alias.lines[0], "INTER ← F5·H1");
+  assert.match(alias.lines[1], /2 predictors/);
+  const unresolved = blockAnnotationContent({ mode: "inter", refs: [1] }, "mode");
+  assert.match(unresolved.detail.join(" "), /Unresolved picture/);
+  assert.doesNotMatch(unresolved.lines[0], /F\d/);
 });
 
 test("coefficient annotations preserve missing, zero, positive density and bounded bar", () => {

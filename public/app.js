@@ -25,7 +25,7 @@ import { analysisModes } from "./analysis-modes.js";
 import { attachPreviewPan } from "./preview-pan.js";
 import { frameReferenceTargets } from "./frame-references.js";
 import { blockAnnotationContent, layoutBlockAnnotations, paintBlockAnnotationElements } from "./block-annotations.js";
-import { buildReferenceStateIndex, blockPredictionSources, timelineReferenceArcs } from "./reference-state.js";
+import { buildReferenceStateIndex, blockPredictionSources, timelineReferenceArcs, pictureLabel, currentPictureDescription, samePacketReference, referenceBlockUsage, REFERENCE_NAMES, namedReferenceBindings, referenceUsageTone, referenceTimelineTargets } from "./reference-state.js";
 
 const elements = {
   openButton: document.querySelector("#open-button"),
@@ -318,8 +318,6 @@ function bindRovingNavigation(container, selector, orientation) {
 function humanType(type) {
   return type.name.replaceAll("_", " ");
 }
-
-const REFERENCE_NAMES = ["LAST", "LAST2", "LAST3", "GOLDEN", "BWDREF", "ALTREF2", "ALTREF"];
 
 function formatBufferRemovalTimes(summary) {
   if (!summary.bufferRemovalTimePresent) return "not present";
@@ -1471,6 +1469,8 @@ function renderTimeline() {
   const selectedFrame = report.frames[selectedIndex];
   const referenceState = referenceStateFor(selectedFrame.frameId);
   const summary = referenceState?.summary ?? displayedFrameSummary(report, selectedFrame);
+  const usage = !summary.showExistingFrame && overlaySupportsFeature("motion-vector")
+    ? referenceBlockUsage(state.overlay?.frames?.find((frame) => frame.frameId === selectedFrame.frameId)?.blocks) : null;
   const { targets, unresolvedSlots } = frameReferenceTargets(report, selectedFrame, summary);
   const visibleIds = new Set(report.frames.slice(windowStart, windowStart + 80).map((frame) => frame.frameId));
   for (const target of targets) visibleIds.add(target.frameId);
@@ -1480,16 +1480,17 @@ function renderTimeline() {
       const hasDiagnostic = diagnosticsForFrame(frame.frameId).some(({ severity }) => severity === "error" || severity === "fatal" || severity === "warning");
       const frameType = displayedFrameSummary(report, frame)?.frameTypeName?.replace("_FRAME", "") ?? "FRAME";
       const references = [...new Set(displayedFrameSummary(report, frame)?.referenceFrameIds?.filter((id) => id !== null) ?? [])];
-      const relation = references.length ? `Refs ${references.map((id) => `#${id}`).join(", ")}` : "Intra / random access";
+      const relation = references.length ? `Reference candidates in packets ${references.map((id) => `F${id}`).join(", ")}` : "Intra / random access";
       const active = frame.frameId === state.selectedFrameId;
+      const referenceTone = referenceUsageTone(referenceState?.bindings?.filter((entry) => entry.frameId === frame.frameId), usage);
       const point = statisticPoints.get(frame.frameId);
       const timing = point?.durationSeconds === null || point?.durationSeconds === undefined
         ? "" : ` · ${formatDuration(point.durationSeconds)}`;
       const bitrate = point?.bitrateBitsPerSecond === null || point?.bitrateBitsPerSecond === undefined
         ? "" : ` · ${formatBitrate(point.bitrateBitsPerSecond)}`;
-      return `<button type="button" class="frame-card ${active ? "active" : ""} ${targets.some((target) => target.frameId === frame.frameId) ? "is-reference" : ""} ${hasDiagnostic ? "error" : ""} ${point?.keyframe ? "keyframe" : ""}" data-frame-id="${frame.frameId}" aria-pressed="${active}" tabindex="${active ? 0 : -1}" title="${escapeHtml(`PTS ${frame.timestamp}${timing} · ${relation}${bitrate} · ${frame.obuIds.length} OBU${hasDiagnostic ? " · Issues found" : ""}`)}"><b>${frame.decodeIndex} · ${escapeHtml(frameType)}</b><span>${formatBytes(frame.declaredSize)}${hasDiagnostic ? " · !" : ""}</span></button>`;
+      return `<button type="button" class="frame-card ${active ? "active" : ""} ${targets.some((target) => target.frameId === frame.frameId) ? "is-reference" : ""} ${referenceTone ? `reference-${referenceTone}` : ""} ${hasDiagnostic ? "error" : ""} ${point?.keyframe ? "keyframe" : ""}" data-frame-id="${frame.frameId}" aria-pressed="${active}" tabindex="${active ? 0 : -1}" title="${escapeHtml(`PTS ${frame.timestamp}${timing} · ${relation}${bitrate} · ${frame.obuIds.length} OBU${hasDiagnostic ? " · Issues found" : ""}`)}"><b>${frame.decodeIndex} · ${escapeHtml(frameType)}</b><span>${formatBytes(frame.declaredSize)}${hasDiagnostic ? " · !" : ""}</span></button>`;
     })
-    .join("")}</div><svg class="timeline-reference-arcs" aria-label="Arrows from selected frame to its references"></svg></div>`;
+    .join("")}</div><svg class="timeline-reference-arcs" aria-label="Reference candidate packets; solid arrows are used by blocks, dashed arrows are unused or unverified"></svg></div>`;
   elements.timeline.querySelectorAll("[data-frame-id]").forEach((button) => {
     button.addEventListener("click", () => selectFrame(Number(button.dataset.frameId)));
   });
@@ -1497,10 +1498,68 @@ function renderTimeline() {
   const referenceMap = document.createElement("div");
   referenceMap.className = "frame-reference-map";
   referenceMap.setAttribute("aria-label", "Selected frame reference relationships");
-  const pictureLink = (picture, frameId) => frameId == null ? "Unresolved" : `<button type="button" data-reference-frame="${frameId}">F${report.frames.find((frame) => frame.frameId === frameId)?.decodeIndex ?? frameId}${picture?.obuId != null ? ` / OBU ${picture.obuId}` : ""}${picture?.hidden ? " · hidden" : ""}</button>`;
-  referenceMap.innerHTML = `<details class="reference-state-panel" open><summary>Reference state · selected F${selectedFrame.decodeIndex}${unresolvedSlots.length ? ` · ${unresolvedSlots.length} unresolved` : ""}</summary><div class="reference-tables"><section><h4>Prediction references · before decode</h4><table><thead><tr><th>Ref</th><th>Slot</th><th>Picture</th></tr></thead><tbody>${(referenceState?.bindings ?? []).map((entry) => `<tr><td>${entry.reference == null ? summary.showExistingFrame ? "Show" : "Signalled" : `R${entry.reference}`}</td><td>${entry.slot}</td><td>${pictureLink(entry.picture, entry.frameId)}</td></tr>`).join("") || `<tr><td colspan="3">${summary.frameTypeName === "KEY_FRAME" || summary.frameTypeName === "INTRA_ONLY_FRAME" ? "Intra · no temporal references" : "No resolved prediction references"}</td></tr>`}</tbody></table></section><section><h4>Reference slots · after decode</h4><table><thead><tr><th>Slot</th><th>Stored picture</th><th>Refresh</th></tr></thead><tbody>${Array.from({ length: 8 }, (_, slot) => { const picture = referenceState?.after[slot]; return `<tr><td>${slot}</td><td>${picture ? pictureLink(picture, picture.frameId) : "Empty / unknown"}</td><td>${summary.refreshFrameFlags & (1 << slot) ? "Updated" : "—"}</td></tr>`; }).join("")}</tbody></table></section></div></details>`;
+  const namedBindings = namedReferenceBindings(referenceState);
+  const pictureLink = (picture, frameId) => {
+    if (!picture) return frameId == null ? "Empty / unknown" : escapeHtml(pictureLabel(null, { frameId }));
+    const label = escapeHtml(pictureLabel(picture, { compact: true }));
+    const description = `${pictureLabel(picture)} · Header OBU ${picture.obuId ?? "?"}${samePacketReference(picture, referenceState) ? " · same packet, different picture" : ""}`;
+    const view = picture.previewFrameId == null ? `<span title="${escapeHtml(`${description} · Preview unavailable`)}">${label}</span>`
+      : `<button class="dpb-picture-link" type="button" data-reference-frame="${picture.previewFrameId}" title="${escapeHtml(`${description} · View in F${picture.previewFrameId}`)}">${label}</button>`;
+    return `${view}<small>Header OBU ${picture.obuId ?? "?"}</small>`;
+  };
+  const usageCell = (entry) => {
+    if (!usage || entry.status !== "mapped") return "—";
+    const count = usage.counts[entry.reference] ?? 0;
+    const value = usage.unknownBlocks ? count ? `≥${count}` : "?" : count ? String(count) : "0 · unused";
+    return `${value}${count ? `<small class="reference-use-label">${entry.direction === "backward" ? "BWD" : "FWD"} · used</small>` : ""}`;
+  };
+  const usageNote = summary.showExistingFrame ? "Displays an already decoded picture; no new prediction blocks."
+    : usage ? `Usage: ${usage.interBlocks} inter / ${usage.totalBlocks} luma blocks. ${usage.unknownBlocks ? `${usage.unknownBlocks} blocks have unknown reference usage. ` : ""}Compound blocks count toward both references.`
+      : "Block usage unavailable — a listed candidate does not prove that any block uses it.";
+  referenceMap.innerHTML = `<details class="reference-state-panel" open><summary>Reference state · selected F${selectedFrame.decodeIndex}${unresolvedSlots.length ? ` · ${unresolvedSlots.length} unresolved` : ""}</summary>
+    <p class="reference-context">${escapeHtml(currentPictureDescription(referenceState))}</p>
+    <p class="reference-usage-legend"><span class="reference-forward" title="Forward reference group: LAST, LAST2, LAST3, GOLDEN">● FWD used</span><span class="reference-backward" title="Backward reference group: BWDREF, ALTREF2, ALTREF">● BWD used</span><span>Dashed outline = selected mapping, not block usage</span></p>
+    <div class="reference-tables"><section><h4>Named references · 7 fixed entries</h4><table><thead><tr><th>Reference name</th><th>Points to</th><th>Blocks</th></tr></thead><tbody>${namedBindings.map((entry) => `<tr data-named-reference="${entry.reference}" class="${usage?.counts[entry.reference] && entry.status === "mapped" ? `reference-used reference-${entry.direction}` : ""}"><td>${entry.status === "mapped" ? `<button class="reference-name" type="button" data-reference-binding="${entry.reference}" data-reference-slot="${entry.slot}" aria-pressed="false">${entry.name}</button>` : `<span class="reference-name">${entry.name}</span>`}<small>R${entry.reference}</small></td><td>${entry.slot == null ? entry.status === "not-applicable" ? "Not used" : "Unresolved" : `→ DPB[${entry.slot}]`}</td><td>${usageCell(entry)}</td></tr>`).join("")}</tbody></table></section>
+    <section><h4>DPB · 8 storage slots</h4><table><thead><tr><th>Slot</th><th>Before decode</th><th>After decode</th></tr></thead><tbody>${Array.from({ length: 8 }, (_, slot) => {
+      const before = referenceState?.before?.[slot], after = referenceState?.after?.[slot];
+      const refreshed = Number.isInteger(summary.refreshFrameFlags) && Boolean(summary.refreshFrameFlags & (1 << slot));
+      const unchanged = Number.isInteger(summary.refreshFrameFlags) && !refreshed && before && before === after;
+      const tone = referenceUsageTone(namedBindings.filter((entry) => entry.slot === slot), usage);
+      const usedLabel = tone === "mixed" ? "FWD + BWD used" : tone === "backward" ? "BWD used" : "FWD used";
+      return `<tr data-dpb-row="${slot}" class="${refreshed ? "dpb-refreshed" : ""} ${tone ? `reference-used reference-${tone}` : ""}"><td><button class="dpb-slot" type="button" data-dpb-slot="${slot}" aria-pressed="false">DPB[${slot}]</button>${tone ? `<small class="reference-use-label">${usedLabel}</small>` : ""}</td><td>${pictureLink(before, before?.frameId)}</td><td>${unchanged ? `<span class="dpb-unchanged">Unchanged</span>` : `${refreshed ? '<span class="dpb-refresh-label">↻ Updated</span>' : ""}${pictureLink(after, after?.frameId)}`}</td></tr>`;
+    }).join("")}</tbody></table></section></div>
+    <output class="dpb-focus-readout" data-dpb-focus="" aria-live="polite">${summary.showExistingFrame ? "Display source · no new prediction" : "Select a named reference or DPB slot to follow its pointers."}</output>
+    <p class="reference-note">${escapeHtml(usageNote)} Arrows separate FWD / BWD groups within each packet: solid = used / display source; dashed = unused or unverified.</p>
+    <details class="reference-help"><summary>How to read frames, references and OBU IDs</summary><dl>
+      <dt>F5·shown / F5·H1</dt><dd>F5 is timeline packet 5, not necessarily one coded picture. “shown” is its displayed picture; H1, H2… are hidden pictures in decode order within that packet. Hidden pictures are not displayed immediately, but may be shown later.</dd>
+      <dt>INTER / INTRA</dt><dd>INTER takes samples from another coded picture, even if both pictures belong to F5. INTRA uses neighbours in the same picture. ← names the source; BI means compound prediction with two predictors.</dd>
+      <dt>Usage colours / selection outline</dt><dd>Blue marks used forward-group references (LAST through GOLDEN); orange marks used backward-group references (BWDREF through ALTREF). FWD/BWD are AV1 reference groups, not the left/right direction of a timeline arrow. Both can point into the same packet. The dashed outline only follows your selected DPB mapping, including aliases that have zero used blocks.</dd>
+      <dt>7 named references → 8 DPB slots → pictures</dt><dd>LAST_FRAME, LAST2_FRAME, LAST3_FRAME, GOLDEN_FRAME, BWDREF_FRAME, ALTREF2_FRAME and ALTREF_FRAME are the fixed names for R1–R7. The frame header maps each name to DPB[0]–DPB[7]. Several names can point to the same slot. The left list uses the DPB before decoding; the right list also shows which stored pictures are replaced after decoding. A name is not a permanent DPB index and does not guarantee a fixed timeline distance. Unresolved means the named mapping is unavailable; it is not an empty DPB slot.</dd>
+      <dt>Header OBU</dt><dd>OBU means Open Bitstream Unit. The ID here identifies the coded picture’s header, not its frame number. A packet can contain multiple picture headers and other OBUs, so the same F number with different header OBU IDs can mean different pictures.</dd>
+    </dl></details></details>`;
   elements.timeline.after(referenceMap);
   referenceMap.querySelectorAll("[data-reference-frame]").forEach((button) => button.addEventListener("click", () => selectFrame(Number(button.dataset.referenceFrame))));
+  const highlightDpb = (slot, scroll = false) => {
+    const aliases = namedBindings.filter((entry) => entry.slot === slot);
+    referenceMap.querySelectorAll("[data-reference-binding]").forEach((button) => {
+      const active = Number(button.dataset.referenceSlot) === slot;
+      button.setAttribute("aria-pressed", String(active));
+      button.closest?.("tr")?.classList.toggle("dpb-linked", active);
+    });
+    referenceMap.querySelectorAll("[data-dpb-slot]").forEach((button) => {
+      const active = Number(button.dataset.dpbSlot) === slot;
+      button.setAttribute("aria-pressed", String(active));
+      button.closest?.("tr")?.classList.toggle("dpb-linked", active);
+      if (active && scroll) button.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    const focus = referenceMap.querySelector("[data-dpb-focus]");
+    if (focus) focus.textContent = `Selected mapping: ${summary.showExistingFrame && summary.frameToShowMapIdx === slot ? "Display source (show_existing_frame)" : aliases.length ? aliases.map((entry) => entry.name).join(" / ") : "No named reference"} → DPB[${slot}] → ${pictureLabel(referenceState?.before?.[slot])} (before decode)`;
+  };
+  referenceMap.querySelectorAll("[data-reference-binding]").forEach((button) => button.addEventListener("click", () => highlightDpb(Number(button.dataset.referenceSlot), true)));
+  referenceMap.querySelectorAll("[data-dpb-slot]").forEach((button) => button.addEventListener("click", () => highlightDpb(Number(button.dataset.dpbSlot))));
+  const initialBinding = namedBindings.find((entry) => entry.slot != null && usage?.counts[entry.reference] > 0) ?? namedBindings.find((entry) => entry.slot != null);
+  if (summary.showExistingFrame && Number.isInteger(summary.frameToShowMapIdx)) highlightDpb(summary.frameToShowMapIdx);
+  else if (initialBinding) highlightDpb(initialBinding.slot);
   elements.timeline.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   const track = elements.timeline.querySelector(".timeline-track");
   const svg = elements.timeline.querySelector(".timeline-reference-arcs");
@@ -1508,9 +1567,22 @@ function renderTimeline() {
     if (!track || !svg) return;
     const bounds = track.getBoundingClientRect();
     const center = (frameId) => { const rect = elements.timeline.querySelector(`[data-frame-id="${frameId}"]`)?.getBoundingClientRect(); return rect ? rect.left - bounds.left + rect.width / 2 : NaN; };
-    const arcs = timelineReferenceArcs(center(selectedFrame.frameId), targets.map((target) => ({ ...target, x: center(target.frameId) })), bounds.width);
+    const directionalTargets = referenceTimelineTargets(targets, referenceState, usage);
+    const arcs = timelineReferenceArcs(center(selectedFrame.frameId), directionalTargets.map((target) => {
+      const siblings = directionalTargets.filter((entry) => entry.frameId === target.frameId);
+      const offset = target.frameId === selectedFrame.frameId ? 0 : (siblings.indexOf(target) - (siblings.length - 1) / 2) * 10;
+      return { ...target, x: center(target.frameId) + offset };
+    }), bounds.width);
     svg.setAttribute("viewBox", `0 0 ${bounds.width} 80`);
-    svg.innerHTML = `<defs><marker id="timeline-ref-head" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#8ccef3"/></marker></defs>${arcs.map((arc, index) => `<g><title>F${selectedFrame.decodeIndex} references F${arc.frame.decodeIndex}; slots ${arc.slotIndices.join(", ")}</title><path d="${arc.path}" fill="none" stroke="#8ccef3" stroke-width="1.5" marker-end="url(#timeline-ref-head)"/><text x="${arc.end + 6}" y="${22 + index * 8}" fill="#b8dff6" font-size="10">F${arc.frame.decodeIndex}</text></g>`).join("")}${arcs.length ? "" : `<text x="12" y="25" fill="#a8bbcc" font-size="11">${summary.frameTypeName === "KEY_FRAME" || summary.frameTypeName === "INTRA_ONLY_FRAME" ? "Intra frame · no temporal dependencies" : "No resolved temporal dependencies"}</text>`}`;
+    svg.innerHTML = `<defs>${["forward", "backward", "unknown", "display"].map((direction) => `<marker id="timeline-ref-${direction}" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="var(--reference-${direction})"/></marker>`).join("")}</defs>${arcs.map((arc, index) => {
+      const { bindings, used, verified, direction } = arc;
+      const status = summary.showExistingFrame ? "display source" : used ? "used by blocks" : verified ? "unused candidate" : "candidate; usage unknown";
+      const pictures = [...new Set(bindings.map((entry) => pictureLabel(entry.picture, { frameId: entry.frameId })))].join("; ");
+      const group = { forward: "FWD", backward: "BWD", display: "SHOW", unknown: "?" }[direction];
+      const label = `F${arc.frame.decodeIndex} · ${group}${arc.frameId === selectedFrame.frameId ? " · other picture" : ""}`;
+      const routes = bindings.map((entry) => `${REFERENCE_NAMES[entry.reference - 1] ?? "Display"} → DPB[${entry.slot}]`);
+      return `<g data-reference-direction="${direction}" data-reference-target="${arc.frameId}"><title>${escapeHtml(`${pictures || label}: ${status}; ${group} group; ${routes.join(", ")}`)}</title><path d="${arc.path}" fill="none" stroke="var(--reference-${direction})" stroke-width="${used ? 2 : 1}"${used ? "" : ' stroke-dasharray="4 3"'} marker-end="url(#timeline-ref-${direction})"/><text x="${arc.end + 6}" y="${22 + index * 8}" fill="var(--reference-${direction})" font-size="10">${escapeHtml(label)}</text></g>`;
+    }).join("")}${arcs.length ? "" : `<text x="12" y="25" fill="#a8bbcc" font-size="11">${summary.frameTypeName === "KEY_FRAME" || summary.frameTypeName === "INTRA_ONLY_FRAME" ? "Intra frame · no temporal dependencies" : "No resolved temporal dependencies"}</text>`}`;
   };
   const arrowFrame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(drawArrows) : null;
   const observer = track && typeof ResizeObserver !== "undefined" ? new ResizeObserver(drawArrows) : null;
@@ -2777,7 +2849,8 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       if (sourceKey === key) return;
       sourceKey = key; clearSources(); sourcePanel.innerHTML = "";
       if (!key) return;
-      const sources = blockPredictionSources(block, referenceStateFor(state.selectedFrameId), state.overlay);
+      const referenceState = referenceStateFor(state.selectedFrameId);
+      const sources = blockPredictionSources(block, referenceState, state.overlay);
       if (!sources.length) {
         sourcePanel.innerHTML = `<p>${block.intraMode != null || block.mode === "intra" ? "Intra prediction uses neighbours in this picture, not another frame." : "No motion/reference data for this block."}</p>`;
         return;
@@ -2789,7 +2862,8 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
         const { picture, region } = source;
         const refWidth = picture?.summary.frameWidth, refHeight = picture?.summary.frameHeight;
         const crop = region ? `${region.x - Math.max(16, region.width / 2)} ${region.y - Math.max(16, region.height / 2)} ${region.width + Math.max(32, region.width)} ${region.height + Math.max(32, region.height)}` : null;
-        return `<section class="prediction-source-card"><h4>MV${source.index + 1} · R${source.reference ?? "?"} → Slot ${source.slot ?? "?"} → ${picture ? `F${picture.frameId} / OBU ${picture.obuId ?? "?"}${picture.hidden ? " (hidden)" : ""}` : "Unresolved"}</h4>${region ? `<svg class="reference-picture" data-source-view="${source.index}" viewBox="${crop}" aria-label="Reference picture and source area"><image data-reference-image width="${refWidth}" height="${refHeight}"/><rect x="${block.x}" y="${block.y}" width="${block.width}" height="${block.height}" fill="none" stroke="#fff" stroke-dasharray="3 2" stroke-width="1" vector-effect="non-scaling-stroke"/><line x1="${block.x + block.width / 2}" y1="${block.y + block.height / 2}" x2="${region.x + region.width / 2}" y2="${region.y + region.height / 2}" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/><rect x="${region.x}" y="${region.y}" width="${region.width}" height="${region.height}" fill="#ffbf6930" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div class="source-actions"><button type="button" data-source-full="${source.index}">Full reference</button>${picture.previewFrameId != null ? `<button type="button" data-source-jump="${picture.previewFrameId}">Open frame ${picture.previewFrameId}</button>` : ""}</div><p>Source (${number(region.x)}, ${number(region.y)}) · ${region.width}×${region.height} · Δ (${number(source.mv.x)}, ${number(source.mv.y)}) px</p><p>${source.overlaps.length ? `Overlaps ${source.overlaps.slice(0, 12).map((entry) => `B${entry.blockId}`).join(", ")}${source.overlaps.length > 12 ? ` +${source.overlaps.length - 12} more` : ""}` : picture.hidden ? "Hidden-picture coding block IDs unavailable" : "No overlapping coding block records"}</p><small data-source-status="${source.index}">${picture.previewFrameId == null ? "Decoded preview of this hidden picture is unavailable" : "Loading reference picture…"}</small>` : `<p>${escapeHtml(source.reason)}</p>`}</section>`;
+        const route = `R${source.reference ?? "?"} → cache slot ${source.slot ?? "?"} · header OBU ${picture?.obuId ?? "?"}`;
+        return `<section class="prediction-source-card"><h4>Predictor ${source.index + 1} ← ${escapeHtml(pictureLabel(picture, { frameId: source.frameId }))}</h4><small>${escapeHtml(route)}</small>${samePacketReference(picture, referenceState) ? `<p>Same packet, different picture — still INTER.</p>` : ""}${region ? `<svg class="reference-picture" data-source-view="${source.index}" viewBox="${crop}" aria-label="Reference picture and source area"><image data-reference-image width="${refWidth}" height="${refHeight}"/><rect x="${block.x}" y="${block.y}" width="${block.width}" height="${block.height}" fill="none" stroke="#fff" stroke-dasharray="3 2" stroke-width="1" vector-effect="non-scaling-stroke"/><line x1="${block.x + block.width / 2}" y1="${block.y + block.height / 2}" x2="${region.x + region.width / 2}" y2="${region.y + region.height / 2}" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/><rect x="${region.x}" y="${region.y}" width="${region.width}" height="${region.height}" fill="#ffbf6930" stroke="#ffbf69" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div class="source-actions"><button type="button" data-source-full="${source.index}">Full reference</button>${picture.previewFrameId != null ? `<button type="button" data-source-jump="${picture.previewFrameId}">View picture in F${picture.previewFrameId}</button>` : ""}</div><p>Source (${number(region.x)}, ${number(region.y)}) · ${region.width}×${region.height} · Δ (${number(source.mv.x)}, ${number(source.mv.y)}) px</p><p>${source.overlaps.length ? `Overlaps ${source.overlaps.slice(0, 12).map((entry) => `B${entry.blockId}`).join(", ")}${source.overlaps.length > 12 ? ` +${source.overlaps.length - 12} more` : ""}` : picture.hidden ? "Hidden-picture coding block IDs unavailable" : "No overlapping coding block records"}</p><small data-source-status="${source.index}">${picture.previewFrameId == null ? "Decoded preview of this hidden picture is unavailable" : "Loading reference picture…"}</small>` : `<p>${escapeHtml(source.reason)}</p>`}</section>`;
       }).join("")}`;
       sourcePanel.querySelectorAll("[data-source-full]").forEach((button) => button.addEventListener("click", () => {
         const source = sources[Number(button.dataset.sourceFull)];
@@ -2850,16 +2924,17 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       paintSources(visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : null);
       readout.hidden = !enabled || state.blockLabels === "off";
       if (readout.hidden) { readout.innerHTML = ""; return; }
-      const heading = { mode: "Predictions · base modes", coefficients: "Residuals · coefficient activity", motion: "Motion · prediction offsets" }[state.overlayLayer];
-      const key = { mode: "INTRA / INTER · BI = compound · V/H = vertical/horizontal · SM = Smooth · PTH = Paeth", coefficients: "NZ = non-zero coefficients · % = count / block area", motion: `R = reference identifier · (Δx, Δy) in pixels · Arrows ×${state.motionVectorScale}` }[state.overlayLayer];
+      const heading = { mode: "Predictions · source pictures", coefficients: "Residuals · coefficient activity", motion: "Motion · prediction offsets" }[state.overlayLayer];
+      const key = { mode: "← = INTER source · BI = two predictors · H1/H2 = hidden pictures in that packet", coefficients: "NZ = non-zero coefficients · % = count / block area", motion: `R = reference identifier · (Δx, Δy) in pixels · Arrows ×${state.motionVectorScale}` }[state.overlayLayer];
       const selected = visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : visibleBlocks.includes(hoveredBlock) ? hoveredBlock : null;
       const content = selected && blockAnnotationContent(selected, state.overlayLayer, options);
       if (content && state.overlayLayer === "mode") {
         for (const source of blockPredictionSources(selected, options.referenceState, state.overlay)) {
-          content.detail.push(`MV${source.index + 1} R${source.reference ?? "?"} → Slot ${source.slot ?? "?"} → ${source.picture ? `F${source.picture.frameId} / OBU ${source.picture.obuId ?? "?"}` : "Unresolved"}${source.region ? ` · source (${Number(source.region.x.toFixed(3))}, ${Number(source.region.y.toFixed(3))})` : ""}`);
+          content.detail.push(`Predictor ${source.index + 1} source area: ${source.region ? `(${Number(source.region.x.toFixed(3))}, ${Number(source.region.y.toFixed(3))}) · ${source.region.width}×${source.region.height}` : source.reason}`);
         }
       }
-      const markup = `<strong>${heading}</strong><span>${key}</span>${content ? `<div class="selected-block-readout"><b>${selected === state.selectedBlock ? "Selected" : "Hover"} B${selected.blockId} · ${selected.width}×${selected.height} · (${selected.x}, ${selected.y}) · ${escapeHtml(["Y", "U", "V"][selected.plane ?? 0] ?? selected.plane)}</b>${content.detail.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : `<small>${labels.length} / ${visibleBlocks.length} block labels · Hover to read · Click to pin · Zoom for more labels</small>`}`;
+      const currentPicture = state.overlayLayer === "mode" ? `<span>Current: ${escapeHtml(pictureLabel(options.referenceState?.picture, { frameId: state.selectedFrameId }))}</span><span>INTRA = same-picture neighbours · V/H = vertical/horizontal · SM = Smooth · PTH = Paeth</span>` : "";
+      const markup = `<strong>${heading}</strong>${currentPicture}<span>${key}</span>${content ? `<div class="selected-block-readout"><b>${selected === state.selectedBlock ? "Selected" : "Hover"} B${selected.blockId} · ${selected.width}×${selected.height} · (${selected.x}, ${selected.y}) · ${escapeHtml(["Y", "U", "V"][selected.plane ?? 0] ?? selected.plane)}</b>${content.detail.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : `<small>${labels.length} / ${visibleBlocks.length} block labels · Hover to read · Click to pin · Zoom for more labels</small>`}`;
       if (readout.innerHTML !== markup) readout.innerHTML = markup;
     };
     let labelFrame = null;
@@ -3132,7 +3207,7 @@ function renderInspector(obu, node, block = null) {
       ["Mode", unavailableInspectionValue("mode", block.mode)], ["Intra mode", block.intraMode == null ? null : intraPredictionName(block.intraMode)], ["Inter mode", unavailableInspectionValue("mode", block.interMode)],
       ["MI position", block.miRow === null || block.miRow === undefined
         ? "—" : `${block.miColumn}, ${block.miRow}`],
-      ["Reference slots", block.refs.join(", ") || "—"], ["Motion vectors", unavailableInspectionValue("motion-vector", vectors)],
+      ["Prediction references", block.refs.map((ref) => `R${ref}`).join(", ") || "—"], ["Motion vectors", unavailableInspectionValue("motion-vector", vectors)],
       ["Compound type", block.compoundType], ["Q index", unavailableInspectionValue("qindex", block.qindex)],
       ["Q delta", unavailableInspectionValue("qindex", block.quantDelta)], ["Transform size", unavailableInspectionValue("transform", block.txSize)], ["Transform type", unavailableInspectionValue("transform", block.txType)],
       ["Non-zero coeffs", unavailableInspectionValue("coefficient", block.coeffNonZero)], ["Filter", unavailableInspectionValue("filter", block.filter)],
@@ -3446,6 +3521,7 @@ elements.overlayInput.addEventListener("change", async () => {
     state.overlay = await response.json();
     state.selectedBlock = null;
     showToast(`Imported ${state.overlay.frames.reduce((sum, frame) => sum + frame.blocks.length, 0)} block records`);
+    renderTimeline();
     if (state.view === "frame") renderSelection();
   } catch (error) {
     showToast(`Block import failed: ${error.message}`);

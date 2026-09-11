@@ -6,7 +6,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { blockAnnotationContent, layoutBlockAnnotations } from "../public/block-annotations.js";
-import { buildReferenceStateIndex, blockPredictionSources } from "../public/reference-state.js";
+import { buildReferenceStateIndex, blockPredictionSources, pictureLabel, referenceBlockUsage, namedReferenceBindings, referenceUsageTone, referenceTimelineTargets } from "../public/reference-state.js";
 
 import {
   analyzeFrameLuma,
@@ -127,6 +127,45 @@ test("media/test streams analyze through the GUI route with real block data", as
       assert.match(blockAnnotationContent(motion, "motion").detail[0], /MV1 R\d: Δx .* px/);
       const referenceStates = buildReferenceStateIndex(report);
       assert.equal(referenceStates.get(0).after.length, 8);
+      if (name === "test_256x256_av1.ivf") {
+        const fifth = referenceStates.get(5);
+        const fifthBlocks = report.blockOverlay.frames.find((frame) => frame.frameId === 5).blocks;
+        const usage = referenceBlockUsage(fifthBlocks);
+        assert.equal(fifth.picture.obuId, 16);
+        assert.equal(pictureLabel(fifth.picture, { compact: true }), "F5·shown");
+        assert.equal(usage.totalBlocks, 22);
+        assert.equal(usage.interBlocks, 22);
+        assert.equal(usage.unknownBlocks, 0);
+        assert.deepEqual(usage.counts.slice(1), [0, 0, 0, 0, 22, 0, 0]);
+        const source = fifth.bindings.find((binding) => binding.reference === 5).picture;
+        assert.equal(source.obuId, 15);
+        assert.equal(pictureLabel(source, { compact: true }), "F5·H1");
+        const named = namedReferenceBindings(fifth);
+        assert.equal(named.length, 7);
+        assert.equal(named[4].name, "BWDREF_FRAME");
+        assert.equal(named[4].slot, 5);
+        assert.equal(named[4].picture, fifth.before[5]);
+        assert.equal(named[6].name, "ALTREF_FRAME");
+        assert.equal(named[6].picture, named[4].picture);
+        for (const block of fifthBlocks) {
+          const annotation = blockAnnotationContent(block, "mode", { referenceState: fifth });
+          assert.equal(annotation.tone, "inter");
+          assert.equal(annotation.lines[0], "INTER ← F5·H1");
+          assert.ok(annotation.detail.includes("Same frame packet, different picture: still INTER"));
+        }
+        const third = referenceStates.get(3);
+        assert.equal(pictureLabel(third.bindings.find((binding) => binding.reference === 1).picture, { compact: true }), "F1·H3");
+        assert.equal(pictureLabel(third.bindings.find((binding) => binding.reference === 5).picture, { compact: true }), "F1·H2");
+        const thirdUsage = referenceBlockUsage(report.blockOverlay.frames.find((frame) => frame.frameId === 3).blocks);
+        assert.equal(thirdUsage.totalBlocks, 31);
+        assert.equal(thirdUsage.counts[1], 10);
+        assert.equal(thirdUsage.counts[5], 25);
+        const thirdNamed = namedReferenceBindings(third);
+        assert.equal(referenceUsageTone(thirdNamed.filter((entry) => entry.slot === 5), thirdUsage), "forward");
+        assert.equal(referenceUsageTone(thirdNamed.filter((entry) => entry.slot === 3), thirdUsage), "backward");
+        assert.equal(referenceUsageTone(thirdNamed.filter((entry) => entry.slot === 2), thirdUsage), null);
+        assert.deepEqual(referenceTimelineTargets([{ frameId: 1 }], third, thirdUsage).map((entry) => [entry.direction, entry.used]), [["forward", true], ["backward", true]]);
+      }
       for (const frameOverlay of report.blockOverlay.frames) {
         const block = frameOverlay.blocks.find((entry) => entry.mv.length > 0);
         if (!block) continue;

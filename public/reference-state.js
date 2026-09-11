@@ -1,9 +1,56 @@
 import { motionVectorToPixels } from "./block-renderer.js";
 
+// Fixed AV1 prediction-reference identifiers. These are not the eight physical
+// DPB indices: the selected header maps each identifier to one of those slots.
+export const REFERENCE_NAMES = Object.freeze(["LAST", "LAST2", "LAST3", "GOLDEN", "BWDREF", "ALTREF2", "ALTREF"]);
+
+// AV1 named reference groups, not the source packet's position on the timeline.
+export function referenceDirection(reference) {
+  return !Number.isInteger(reference) || reference < 1 || reference > 7 ? null : reference <= 4 ? "forward" : "backward";
+}
+
+export function referenceUsageTone(bindings, usage) {
+  const directions = new Set((bindings ?? []).filter((entry) => usage?.counts[entry.reference] > 0)
+    .map((entry) => referenceDirection(entry.reference)).filter(Boolean));
+  return directions.size > 1 ? "mixed" : [...directions][0] ?? null;
+}
+
+// A packet may hold both forward- and backward-group source pictures. Keep
+// their arrows separate even when they terminate at the same timeline card.
+export function referenceTimelineTargets(targets, referenceState, usage) {
+  const display = Boolean(referenceState?.summary?.showExistingFrame);
+  return targets.flatMap((target) => {
+    const bindings = (referenceState?.bindings ?? []).filter((entry) => entry.frameId === target.frameId);
+    const groups = display ? ["display"] : [...new Set(bindings.map((entry) => referenceDirection(entry.reference) ?? "unknown"))];
+    if (!groups.length) groups.push("unknown");
+    return groups.map((direction) => {
+      const entries = display ? bindings : bindings.filter((entry) => (referenceDirection(entry.reference) ?? "unknown") === direction);
+      return { ...target, direction, bindings: entries,
+        used: display || entries.some((entry) => usage?.counts[entry.reference] > 0),
+        verified: Boolean(usage && !usage.unknownBlocks && entries.length && entries.every((entry) => referenceDirection(entry.reference))),
+      };
+    });
+  });
+}
+
+export function namedReferenceBindings(referenceState) {
+  const summary = referenceState?.summary;
+  const inactive = summary?.showExistingFrame || ["KEY_FRAME", "INTRA_ONLY_FRAME"].includes(summary?.frameTypeName);
+  return REFERENCE_NAMES.map((name, index) => {
+    const reference = index + 1;
+    const binding = !inactive && referenceState?.bindings?.find((entry) => entry.reference === reference);
+    const mapped = Number.isInteger(binding?.slot) && binding.slot >= 0 && binding.slot < 8;
+    return { reference, name: `${name}_FRAME`, direction: referenceDirection(reference), slot: mapped ? binding.slot : null,
+      picture: mapped ? binding.picture ?? null : null, frameId: mapped ? binding.frameId ?? null : null,
+      status: inactive ? "not-applicable" : mapped ? "mapped" : "unavailable" };
+  });
+}
+
 // Replay coded headers, including hidden pictures in a container packet. A
 // picture is identified by its OBU, not just its container frame ID.
 export function buildReferenceStateIndex(report) {
   const slots = Array(8).fill(null), states = new Map();
+  const packetPictures = new Map();
   const headers = (report.obus ?? []).filter((obu) => (obu.frameHeaderSummary || [3, 6].includes(obu.type?.code)) && obu.type?.code !== 7);
   const events = headers.length ? headers : (report.frames ?? []).map((frame) => ({ frameId: frame.frameId, obuId: null, frameHeaderSummary: frame.headerSummary }));
   for (const obu of events) {
@@ -21,17 +68,62 @@ export function buildReferenceStateIndex(report) {
       slot, frameId: ids[index] ?? null,
       picture: before[slot]?.frameId === ids[index] ? before[slot] : null,
     }));
+    if (!packetPictures.has(obu.frameId)) packetPictures.set(obu.frameId, []);
+    const pictures = packetPictures.get(obu.frameId);
     const picture = summary.showExistingFrame ? before[summary.frameToShowMapIdx] ?? null
       : { frameId: obu.frameId, obuId: obu.obuId, summary, hidden: !summary.showFrame, previewFrameId: summary.showFrame ? obu.frameId : null };
+    if (picture && !summary.showExistingFrame) {
+      if (picture.hidden) picture.hiddenIndex = pictures.filter((entry) => entry.hidden).length + 1;
+      pictures.push(picture);
+    }
     // A hidden picture may later become viewable via show_existing_frame.
     if (picture && summary.showExistingFrame && picture.previewFrameId == null) picture.previewFrameId = obu.frameId;
     if (Number.isInteger(summary.refreshFrameFlags)) {
       for (let slot = 0; slot < 8; slot++) if (summary.refreshFrameFlags & (1 << slot)) slots[slot] = picture;
     } else slots.fill(null); // Never claim stale state after an incomplete header.
-    const state = { frameId: obu.frameId, obuId: obu.obuId, summary, before, after: slots.slice(), bindings, picture };
+    const state = { frameId: obu.frameId, obuId: obu.obuId, summary, before, after: slots.slice(), bindings, picture, packetPictures: pictures };
     if (!states.has(obu.frameId) || summary.showFrame || summary.showExistingFrame) states.set(obu.frameId, state);
   }
   return states;
+}
+
+export function pictureLabel(picture, { compact = false, frameId = null } = {}) {
+  if (!picture) return frameId == null ? "Unresolved picture" : compact ? `F${frameId}·?` : `Frame ${frameId} · picture unresolved`;
+  const hiddenName = picture.hiddenIndex != null ? `hidden picture ${picture.hiddenIndex}` : `hidden picture (header OBU ${picture.obuId ?? "?"})`;
+  if (!compact) return `Frame ${picture.frameId} · ${picture.hidden ? hiddenName : "shown picture"}`;
+  return `F${picture.frameId}·${picture.hidden ? picture.hiddenIndex != null ? `H${picture.hiddenIndex}` : `OBU${picture.obuId ?? "?"}` : "shown"}`;
+}
+
+export function currentPictureDescription(referenceState) {
+  if (!referenceState?.picture) return "Current coded picture is unresolved.";
+  const current = pictureLabel(referenceState.picture);
+  if (referenceState.summary?.showExistingFrame) return `Frame ${referenceState.frameId} displays ${current} from the reference cache; no new picture is coded.`;
+  const hiddenCount = referenceState.packetPictures?.filter((picture) => picture.hidden).length ?? 0;
+  return `Viewing ${current}.${hiddenCount ? ` This packet also contains ${hiddenCount} hidden reference picture${hiddenCount === 1 ? "" : "s"}.` : ""}`;
+}
+
+export function samePacketReference(picture, referenceState) {
+  return Boolean(picture && referenceState?.picture && picture.frameId === referenceState.frameId
+    && picture.obuId != null && referenceState.picture.obuId != null && picture.obuId !== referenceState.picture.obuId);
+}
+
+// Header reference choices need not all be used by blocks. Count each luma
+// block once per reference, including both predictors for compound blocks.
+export function referenceBlockUsage(blocks) {
+  const luma = blocks?.filter((block) => (block.plane ?? 0) === 0) ?? [];
+  if (!luma.length) return null;
+  const counts = Array(8).fill(0);
+  let unknownBlocks = 0, interBlocks = 0;
+  for (const block of luma) {
+    if (block.intraMode != null || block.mode === "intra") continue;
+    if (block.interMode == null && block.mode !== "inter") { unknownBlocks++; continue; }
+    interBlocks++;
+    const signalled = [...new Set(block.refs ?? [])];
+    const refs = signalled.filter((ref) => Number.isInteger(ref) && ref >= 1 && ref <= 7);
+    if (!refs.length || refs.length !== signalled.length) unknownBlocks++;
+    for (const ref of refs) counts[ref]++;
+  }
+  return { counts, totalBlocks: luma.length, interBlocks, unknownBlocks };
 }
 
 export function blockPredictionSources(block, referenceState, overlay) {

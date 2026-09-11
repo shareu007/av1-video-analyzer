@@ -10,6 +10,11 @@
   --muted-2: #8d9098;
   --accent: #87b2db;
   --accent-2: #729fc9;
+  --reference-forward: #8ccef3;
+  --reference-backward: #ffbd75;
+  --reference-mixed: #c9b1ed;
+  --reference-unknown: #a8bbcc;
+  --reference-display: #b7d6ac;
   --warning: #ffb547;
   --danger: #ff6577;
   --shadow: none;
@@ -29,6 +34,11 @@
   --muted-2: #81929e;
   --accent: #286394;
   --accent-2: #3977a8;
+  --reference-forward: #236488;
+  --reference-backward: #98520c;
+  --reference-mixed: #6a4294;
+  --reference-unknown: #5f7582;
+  --reference-display: #416f32;
   --warning: #bb6b00;
   --danger: #d92d43;
   --shadow: none;
@@ -612,15 +622,46 @@ html, body { max-width: 100%; }
 .timeline-track { width: max-content; min-width: 100%; }
 .timeline-cards { display: flex; gap: 4px; height: 52px; }
 .timeline-reference-arcs { display: block; width: 100%; height: 80px; }
-.frame-card.is-reference { border-bottom: 2px solid #8ccef3; }
+.frame-card.is-reference { border-bottom: 2px solid var(--reference-unknown); }
+.frame-card.is-reference.reference-forward { border-bottom-color: var(--reference-forward); }
+.frame-card.is-reference.reference-backward { border-bottom-color: var(--reference-backward); }
+.frame-card.is-reference.reference-mixed { border-bottom-color: var(--reference-backward); box-shadow: inset 0 -3px var(--reference-forward); }
 .frame-reference-map { display: block; padding: 0; white-space: normal; overflow: hidden; }
 .reference-state-panel > summary { padding: 5px 8px; cursor: pointer; font-size: 11px; }
-.reference-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-height: 135px; overflow: auto; padding: 0 8px 6px; }
+.reference-context, .reference-note { margin: 0; padding: 0 8px 5px; font-size: 10px; line-height: 1.4; }
+.reference-note { color: var(--muted); }
+.reference-forward { --reference-color: var(--reference-forward); }
+.reference-backward { --reference-color: var(--reference-backward); }
+.reference-mixed { --reference-color: var(--reference-mixed); }
+.reference-usage-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; padding: 0 8px 5px; color: var(--muted); font-size: 10px; }
+.reference-usage-legend .reference-forward, .reference-usage-legend .reference-backward { color: var(--reference-color); }
+.reference-help { padding: 0 8px 5px; font-size: 10px; line-height: 1.5; }
+.reference-help > summary { cursor: pointer; color: var(--muted); }
+.reference-help dl { max-height: 130px; overflow: auto; margin: 5px 0 0; }
+.reference-help dt { font-weight: 600; }
+.reference-help dd { margin: 0 0 5px; color: var(--muted); }
+.reference-tables { display: grid; grid-template-columns: minmax(230px, .85fr) minmax(270px, 1.15fr); gap: 12px; max-height: 225px; overflow: auto; padding: 0 8px 6px; }
 .reference-tables h4 { margin: 0 0 4px; font-size: 10px; font-weight: 500; }
 .reference-tables table { width: 100%; border-collapse: collapse; font: 10px/1.4 var(--mono); text-align: left; }
 .reference-tables th, .reference-tables td { padding: 1px 4px; border-bottom: 1px solid #64748b33; }
+.reference-tables td { vertical-align: top; }
+.reference-tables small { display: block; color: var(--muted); font-size: 9px; }
+.reference-tables [data-named-reference].reference-used > td,
+.reference-tables [data-dpb-row].reference-used > td:nth-child(-n+2) { background: color-mix(in srgb, var(--reference-color) 13%, transparent); }
+.reference-tables .reference-used > td:first-child { box-shadow: inset 3px 0 var(--reference-color); }
+.reference-tables .reference-used > td:first-child,
+.reference-tables [data-named-reference].reference-used > td:last-child { font-weight: 700; color: var(--reference-color); }
+.reference-tables .reference-used .reference-name, .reference-tables .reference-used .dpb-slot, .reference-tables .reference-use-label { color: var(--reference-color); }
+.reference-tables [data-dpb-row].reference-mixed > td:nth-child(-n+2) { background: linear-gradient(110deg, color-mix(in srgb, var(--reference-forward) 15%, transparent), color-mix(in srgb, var(--reference-backward) 15%, transparent)); }
 .reference-tables button { padding: 0; border: 0; color: var(--text); background: none; text-align: left; cursor: pointer; font: inherit; }
 .reference-tables button:hover { text-decoration: underline; }
+.reference-tables .reference-name, .reference-tables .dpb-slot { white-space: nowrap; }
+.reference-tables .dpb-picture-link { text-decoration: underline; text-underline-offset: 2px; }
+.reference-tables button[aria-pressed="true"] { font-weight: 700; }
+.reference-tables .dpb-linked { outline: 1px dashed var(--muted); outline-offset: -1px; }
+.dpb-focus-readout { display: block; margin: 0 8px 5px; padding: 4px 6px; border-left: 2px dashed var(--muted); background: var(--surface-2); font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
+.dpb-refresh-label { display: block; color: var(--accent); font-size: 9px; }
+.dpb-unchanged { color: var(--muted); }
 .prediction-sources { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .prediction-sources:empty { display: none; }
 .prediction-sources > header, .prediction-sources > p { grid-column: 1 / -1; margin: 0; font-size: 12px; }

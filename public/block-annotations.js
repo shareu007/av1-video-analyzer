@@ -1,4 +1,5 @@
 import { coefficientDensity, intraPredictionName, motionVectorToPixels } from "./block-renderer.js";
+import { pictureLabel, samePacketReference } from "./reference-state.js";
 
 const signed = (value) => `${value > 0 ? "+" : ""}${Number(value.toFixed(3))}`;
 const reference = (block, index) => Number.isInteger(block.refs?.[index]) ? `R${block.refs[index]}` : "R?";
@@ -12,17 +13,22 @@ export function blockAnnotationContent(block, layer, options = {}) {
     if (!intra && block.interMode == null && block.mode !== "inter") return { tone: "unknown", compact: "?", lines: ["Prediction ?", block.skip ? "Transform skipped" : "Not available"], detail: ["Prediction mode unavailable", ...(block.skip ? ["Transform skipped"] : [])] };
     const name = intra ? intraPredictionName(block.intraMode) : block.interMode ?? "Inter";
     const short = { Vertical: "V", Horizontal: "H", "Smooth V": "SM-V", "Smooth H": "SM-H", Smooth: "SM", Paeth: "PTH", Unavailable: "?" }[name] ?? name;
-    const refs = (block.refs ?? []).map((id, index) => {
+    const bindings = (block.refs ?? []).map((id, index) => {
       const binding = options.referenceState?.bindings.find((entry) => entry.reference === id);
-      return `${reference(block, index)}${binding?.frameId != null ? `→F${binding.frameId}` : ""}`;
-    }).join(" + ");
+      return { ...binding, reference: reference(block, index) };
+    });
+    const sourceNames = [...new Set(bindings.map((binding) => binding.picture
+      ? pictureLabel(binding.picture, { compact: true }) : `${binding.reference}?`))];
+    const source = sourceNames.join(" + ");
+    const routes = bindings.map((binding) => `${binding.reference} → cache slot ${binding.slot ?? "?"} → ${pictureLabel(binding.picture, { frameId: binding.frameId })}`);
+    const samePacket = bindings.some((binding) => samePacketReference(binding.picture, options.referenceState));
     return {
       tone: intra ? "intra" : "inter",
-      compact: intra ? short : block.refs?.length > 1 ? "BI" : refs || "INTER",
+      compact: intra ? short : block.refs?.length > 1 ? "BI" : source ? `←${source}` : "INTER",
       lines: intra ? [`INTRA ${INTRA_SYMBOLS[name] ?? ""} ${name}`.replace(/ +/g, " "), block.skip ? "Transform skipped" : "Spatial prediction"]
-        : [block.refs?.length > 1 ? `COMPOUND ${refs}` : `INTER ${refs}`.trim(), `${name}${block.skip ? " · TX skip" : ""}`],
+        : [`INTER ← ${source || "unresolved source"}`, block.refs?.length > 1 ? "Compound · 2 predictors" : samePacket ? "Same packet · different picture" : "From another coded picture"],
       detail: intra ? [`Base mode: ${name}`, "Uses same-picture neighbours", ...(INTRA_SYMBOLS[name] ? ["Symbol indicates base direction; angle delta unavailable"] : []), ...(block.skip ? ["Transform skipped (not a prediction mode)"] : [])]
-        : [`Prediction: ${name}`, `Reference identifiers: ${refs || "unavailable"}`, ...(block.skip ? ["Transform skipped"] : [])],
+        : ["INTER: samples from another coded picture", ...routes, ...(samePacket ? ["Same frame packet, different picture: still INTER"] : []), ...(block.refs?.length > 1 ? ["Compound prediction combines two predictors"] : []), `Coded mode: ${name}`, ...(block.skip ? ["Transform skipped"] : [])],
     };
   }
   if (layer === "coefficients") {
