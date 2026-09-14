@@ -693,6 +693,72 @@ async function hiddenPictureSample(t) {
   catch (error) { if (error.code !== "ENOENT") throw error; t.skip("local test media is not installed"); return null; }
 }
 
+test("wheel and dropdown zoom update the existing preview, keep inspection state, and reset to Fit", async () => {
+  let previewRequests = 0;
+  const harness = await client(async (url) => {
+    if (url === "/api/health") return health();
+    previewRequests++;
+    throw new Error("zoom must not decode the picture again");
+  });
+  const { app, context } = harness;
+  const { viewport, nodes } = picturePreviewDom(harness);
+  const query = viewport.querySelector;
+  viewport.querySelector = (selector) => {
+    const node = query(selector);
+    if (selector === ".preview-scroll") {
+      node.clientWidth = 400; node.clientHeight = 300;
+      node.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 300 });
+      node.querySelector = (name) => name === ".preview-stage" ? query(name) : null;
+    }
+    if (selector === ".preview-stage") node.getBoundingClientRect = () => {
+      const width = node.style.width.startsWith("min(") ? 256 : Number.parseFloat(node.style.width);
+      const [x, y] = (node.style.translate || "0 0").split(" ").map(Number.parseFloat);
+      return { left: 100 + Math.max(0, (400 - width) / 2) + x, top: 50 + y, width, height: width };
+    };
+    return node;
+  };
+  Object.assign(app.state, { view: "frame", selectedFrameId: 0,
+    report: { frames: [{ frameId: 0, obuIds: [] }], obus: [], syntaxNodes: [], container: { width: 256, height: 256 } } });
+  app.state.previews.set(0, { status: "ready", url: "blob:zoom-test" });
+  await vm.runInContext("renderFramePreview()", context);
+  const stage = nodes.get(".preview-stage"), scroll = nodes.get(".preview-scroll");
+  const control = nodes.get("#preview-zoom"), details = nodes.get("#luma-details");
+  details.open = true;
+  const selectedBlock = { blockId: 42 };
+  app.state.selectedBlock = selectedBlock;
+  const markup = viewport.innerHTML;
+  const before = stage.getBoundingClientRect(), point = { x: 230, y: 160 };
+  const source = { x: (point.x - before.left) / before.width, y: (point.y - before.top) / before.height };
+  let prevented = false;
+  await scroll.dispatch("wheel", { target: scroll, deltaY: -100, deltaMode: 0, clientX: point.x, clientY: point.y, preventDefault() { prevented = true; } });
+  const after = stage.getBoundingClientRect();
+  assert.equal(prevented, true);
+  assert.ok(after.width > before.width);
+  assert.ok(Math.abs(after.left + source.x * after.width - point.x) < 1e-8);
+  assert.ok(Math.abs(after.top + source.y * after.height - point.y) < 1e-8);
+  assert.equal(control.value, String(app.state.previewZoom));
+  assert.match(control.innerHTML, /122.1%/);
+  assert.equal(viewport.innerHTML, markup);
+  assert.equal(nodes.get("#preview-zoom"), control, "zoom keeps the focused control mounted");
+  assert.equal(details.open, true);
+  assert.equal(app.state.selectedBlock, selectedBlock);
+  await control.dispatch("change", { target: { value: "2" } });
+  assert.equal(stage.style.width, "512px");
+  assert.equal(app.state.previewZoom, 2);
+  await nodes.get("#preview-reset").dispatch("click");
+  assert.equal(app.state.previewZoom, "fit");
+  assert.equal(control.value, "fit");
+  const reset = stage.getBoundingClientRect();
+  assert.equal(reset.width, 256);
+  assert.equal(reset.left + reset.width / 2, 300);
+  assert.equal(reset.top + reset.height / 2, 200);
+  assert.equal(previewRequests, 0);
+  const cleanup = app.state.previewPanCleanup;
+  vm.runInContext("releaseBlockRenderer()", context);
+  assert.equal(scroll.listeners.get("wheel").length, 0);
+  assert.notEqual(cleanup, null);
+});
+
 test("real hidden-picture OBU and dropdown selection change preview without leaving the packet", async (t) => {
   const bytes = await hiddenPictureSample(t);
   if (!bytes) return;

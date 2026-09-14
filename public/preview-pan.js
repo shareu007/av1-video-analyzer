@@ -7,8 +7,8 @@ function isControl(target, viewport) {
   return Boolean(target.isPreviewControl);
 }
 
-/** Pan the entire image/overlay stage, including when it fits the viewport. */
-export function attachPreviewPan(viewport, { viewState = {} } = {}) {
+/** Pan/zoom the shared image and overlay stage without replacing its DOM. */
+export function attachPreviewPan(viewport, { viewState = {}, zoom = null } = {}) {
   if (!viewport || typeof viewport.addEventListener !== "function") {
     throw new TypeError("attachPreviewPan requires an event target viewport");
   }
@@ -17,6 +17,7 @@ export function attachPreviewPan(viewport, { viewState = {} } = {}) {
   let suppressNextClick = false;
   const stage = viewport.querySelector?.(".preview-stage");
   const originalTranslate = stage?.style.translate;
+  const originalWidth = stage?.style.width;
   let panX = 0;
   let panY = 0;
   const geometry = () => {
@@ -124,9 +125,55 @@ export function attachPreviewPan(viewport, { viewState = {} } = {}) {
     viewState.center = { x: 0.5, y: 0.5 };
     restoreCenter();
   };
+  const canZoom = Boolean(stage && Number.isFinite(zoom?.sourceWidth) && zoom.sourceWidth > 0);
+  const setZoom = (value, anchor = null) => {
+    if (!canZoom) return false;
+    const measured = geometry();
+    if (!measured) return false;
+    const scale = value === "fit" ? null : Number(value);
+    if (value !== "fit" && !(Number.isFinite(scale) && scale > 0)) return false;
+    if (value === "fit" && !zoom.fitWidth) return false;
+    finish();
+    const x = Number.isFinite(anchor?.x) ? anchor.x : measured.x;
+    const y = Number.isFinite(anchor?.y) ? anchor.y : measured.y;
+    const point = { x: (x - measured.picture.left) / measured.picture.width,
+      y: (y - measured.picture.top) / measured.picture.height };
+    const next = scale === null ? "fit" : Math.max(zoom.minimum ?? 0.01, Math.min(zoom.maximum ?? 16, scale));
+    stage.style.width = next === "fit" ? zoom.fitWidth : `${zoom.sourceWidth * next}px`;
+    const resized = stage.getBoundingClientRect();
+    // Width changes may also move auto margins. Compensate for both so the
+    // same source pixel remains under the pointer, even after panning.
+    panX += x - resized.left - point.x * resized.width;
+    panY += y - resized.top - point.y * resized.height;
+    stage.style.translate = `${panX}px ${panY}px`;
+    rememberCenter();
+    zoom.onChange?.(next);
+    return true;
+  };
+  const zoomBy = (factor, anchor) => {
+    const measured = geometry();
+    if (!canZoom || !measured) return false;
+    return setZoom(measured.picture.width / zoom.sourceWidth * factor, anchor);
+  };
+  const onWheel = (event) => {
+    // Leave browser zoom shortcuts and controls alone; consume only vertical
+    // wheel gestures inside the picture viewport, including at zoom limits.
+    if (!canZoom || event.ctrlKey || event.metaKey || isControl(event.target, viewport)
+      || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+    const pixels = Math.max(-240, Math.min(240, event.deltaY * unit));
+    if (zoomBy(Math.exp(-pixels * 0.002), { x: event.clientX, y: event.clientY })) event.preventDefault();
+  };
+  const resetView = () => { if (canZoom) setZoom("fit"); resetPan(); };
   const onKeyDown = (event) => {
     if (event.target !== viewport || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Home") { event.preventDefault(); resetPan(); return; }
+    if (canZoom && ["+", "=", "-", "0"].includes(event.key)) {
+      event.preventDefault();
+      if (event.key === "0") resetView();
+      else zoomBy(event.key === "-" ? 1 / 1.25 : 1.25);
+      return;
+    }
     const delta = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] }[event.key];
     if (!delta || !stage) return;
     event.preventDefault();
@@ -144,8 +191,9 @@ export function attachPreviewPan(viewport, { viewState = {} } = {}) {
   viewport.addEventListener("lostpointercapture", finish);
   viewport.addEventListener("click", onClick, true);
   viewport.addEventListener("dragstart", preventNativeDrag);
-  viewport.addEventListener("dblclick", resetPan);
+  viewport.addEventListener("dblclick", resetView);
   viewport.addEventListener("keydown", onKeyDown);
+  viewport.addEventListener("wheel", onWheel, { passive: false });
 
   const cleanup = () => {
     observer?.disconnect();
@@ -157,17 +205,20 @@ export function attachPreviewPan(viewport, { viewState = {} } = {}) {
     viewport.removeEventListener("lostpointercapture", finish);
     viewport.removeEventListener("click", onClick, true);
     viewport.removeEventListener("dragstart", preventNativeDrag);
-    viewport.removeEventListener("dblclick", resetPan);
+    viewport.removeEventListener("dblclick", resetView);
     viewport.removeEventListener("keydown", onKeyDown);
+    viewport.removeEventListener("wheel", onWheel);
     finish();
     if (stage) {
       stage.style.translate = originalTranslate ?? "";
+      if (canZoom) stage.style.width = originalWidth ?? "";
       viewport.classList?.remove("free-pan");
     }
     viewport.classList?.remove("is-panning");
     gesture = null;
     suppressNextClick = false;
   };
-  cleanup.reset = resetPan;
+  cleanup.reset = resetView;
+  cleanup.zoomTo = setZoom;
   return cleanup;
 }

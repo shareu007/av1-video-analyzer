@@ -1643,6 +1643,15 @@ function bindPictureControl() {
   elements.viewportContent.querySelector("#preview-picture")?.addEventListener("change", (event) => selectPicture(Number(event.target.value)));
 }
 
+function previewZoomOptions() {
+  const presets = [["fit", "Fit"], ["0.25", "25%"], ["0.5", "50%"], ["1", "100%"], ["2", "200%"], ["4", "400%"], ["8", "800%"], ["16", "1600%"]];
+  const current = String(state.previewZoom);
+  if (!presets.some(([value]) => value === current) && Number.isFinite(Number(current))) {
+    presets.push([current, `${Number((Number(current) * 100).toFixed(1))}%`]);
+  }
+  return presets.map(([value, label]) => `<option value="${value}" ${current === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
 function obuMatches(obu) {
   if (!state.filter) return true;
   const query = state.filter.toLowerCase();
@@ -2806,8 +2815,9 @@ async function renderFramePreview() {
     bindPictureControl();
     const stage = elements.viewportContent.querySelector(".preview-stage");
     stage.style.aspectRatio = `${width} / ${height}`;
-    stage.style.width = state.previewZoom === "fit" ? `min(100%, ${width / height * 65}vh, ${width / height * 600}px)` : `${width * Number(state.previewZoom)}px`;
-    stage.parentElement.insertAdjacentHTML("beforebegin", `<div class="preview-toolbar"><label>Mode <select id="analysis-mode">${modes.map((mode) => `<option value="${mode.id}" ${mode.id === activeMode.id ? "selected" : ""} ${mode.available ? "" : "disabled"} title="${escapeHtml(mode.note)}">${mode.label}${mode.available ? "" : " — unavailable"}</option>`).join("")}</select></label><label>Zoom <select id="preview-zoom">${[["fit", "Fit"], ["1", "100%"], ["2", "200%"], ["4", "400%"], ["8", "800%"]].map(([value, label]) => `<option value="${value}" ${String(state.previewZoom) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button id="preview-reset" class="secondary-button" type="button">Reset view</button><span>Drag to pan · Click to inspect · Double-click to reset</span></div><p class="mode-description">${activeMode.id !== state.analysisMode ? "Requested mode has no data for this frame. Showing the decoded picture. " : ""}${escapeHtml(activeMode.note)}</p>`);
+    const fitWidth = `min(100%, ${width / height * 65}vh, ${width / height * 600}px)`;
+    stage.style.width = state.previewZoom === "fit" ? fitWidth : `${width * Number(state.previewZoom)}px`;
+    stage.parentElement.insertAdjacentHTML("beforebegin", `<div class="preview-toolbar"><label>Mode <select id="analysis-mode">${modes.map((mode) => `<option value="${mode.id}" ${mode.id === activeMode.id ? "selected" : ""} ${mode.available ? "" : "disabled"} title="${escapeHtml(mode.note)}">${mode.label}${mode.available ? "" : " — unavailable"}</option>`).join("")}</select></label><label>Zoom <select id="preview-zoom">${previewZoomOptions()}</select></label><button id="preview-reset" class="secondary-button" type="button">Reset view</button><span>Wheel to zoom · Drag to pan · Click to inspect · Double-click to fit</span></div><p class="mode-description">${activeMode.id !== state.analysisMode ? "Requested mode has no data for this frame. Showing the decoded picture. " : ""}${escapeHtml(activeMode.note)}</p>`);
     elements.viewportContent.querySelector("#analysis-mode").addEventListener("change", (event) => {
       const mode = modes.find(({ id }) => id === event.target.value);
       if (!mode?.available) return;
@@ -2819,8 +2829,7 @@ async function renderFramePreview() {
       if (obu) renderInspector(obu, selectedNode(), state.selectedBlock);
     });
     elements.viewportContent.querySelector("#preview-zoom").addEventListener("change", (event) => {
-      state.previewZoom = event.target.value;
-      renderFramePreview();
+      state.previewPanCleanup?.zoomTo(event.target.value);
     });
     elements.viewportContent.querySelector("#sb-grid-toggle").addEventListener("change", (event) => {
       state.showSuperblockGrid = event.target.checked;
@@ -2829,8 +2838,13 @@ async function renderFramePreview() {
     if (hasBlocks) setupBlockOverlay(frameOverlay.blocks, width, height, hasMotionVectors);
     const previewViewport = elements.viewportContent.querySelector(".preview-scroll");
     previewViewport.tabIndex = 0;
-    previewViewport.setAttribute("aria-label", "Frame viewer. Drag or use arrow keys to pan; Home resets the view.");
-    state.previewPanCleanup = attachPreviewPan(previewViewport, { viewState: state.previewView });
+    previewViewport.setAttribute("aria-label", "Frame viewer. Wheel or +/- to zoom. Drag or arrow keys to pan. Home centers; 0 or double-click fits the picture.");
+    state.previewPanCleanup = attachPreviewPan(previewViewport, { viewState: state.previewView,
+      zoom: { sourceWidth: width, fitWidth, onChange(value) {
+        state.previewZoom = value;
+        const control = elements.viewportContent.querySelector("#preview-zoom");
+        if (control) { control.innerHTML = previewZoomOptions(); control.value = String(value); }
+      } } });
     elements.viewportContent.querySelector("#preview-reset").addEventListener("click", () => state.previewPanCleanup?.reset());
     elements.viewportContent.querySelector(".frame-preview").insertAdjacentHTML("beforeend", `<details class="analysis-disclosure" id="luma-details"><summary>Luma statistics</summary></details>`);
     const lumaDetails = elements.viewportContent.querySelector("#luma-details");
@@ -3012,7 +3026,7 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
     };
     // Pan transforms do not trigger ResizeObserver. Repack after movement so
     // labels entering the viewport are never starved by the DOM label limit.
-    const labelEvents = ["pointermove", "pointerup", "keydown", "dblclick", "scroll"];
+    const labelEvents = ["pointermove", "pointerup", "keydown", "dblclick", "scroll", "wheel"];
     for (const event of labelEvents) viewport.addEventListener(event, scheduleLabels);
     const resetControl = elements.viewportContent.querySelector("#preview-reset");
     resetControl?.addEventListener("click", scheduleLabels);
