@@ -1,4 +1,4 @@
-import { coefficientDensity, intraPredictionName, motionVectorToPixels } from "./block-renderer.js";
+import { coefficientActivity, intraPredictionName, motionVectorToPixels } from "./block-renderer.js";
 import { pictureLabel, samePacketReference } from "./reference-state.js";
 
 const signed = (value) => `${value > 0 ? "+" : ""}${Number(value.toFixed(3))}`;
@@ -32,16 +32,27 @@ export function blockAnnotationContent(block, layer, options = {}) {
     };
   }
   if (layer === "coefficients") {
-    const density = coefficientDensity(block);
-    if (density === null) return { tone: "unknown", compact: "?", lines: ["NZ ?", "Not available"], detail: ["Coefficient data unavailable; not equivalent to zero"] };
-    const percent = `${(density * 100).toFixed(1)}%`;
+    const activity = coefficientActivity(block);
+    const { density, label, symbol, percent, cssColor, bar } = activity;
+    if (density === null) return { tone: "unknown", compact: "?", lines: ["No data", "NZ unavailable"], accent: cssColor,
+      detail: ["Coefficient data unavailable; not equivalent to zero"] };
+    const count = block.coeffNonZero, area = block.width * block.height;
+    if (density > 1) return { tone: "unknown", compact: "!", lines: ["Area mismatch", `NZ ${count}`], accent: cssColor,
+      detail: [`Non-zero coefficients: ${count}`, `Count / displayed block area: ${count} / ${area} = ${percent}`,
+        "Count exceeds displayed area; clipped geometry or mismatched data may be responsible. Density grading is unavailable."] };
     return {
       tone: density === 0 ? "zero" : "residual",
-      compact: `${block.coeffNonZero}`,
-      lines: [`NZ ${block.coeffNonZero}`, density === 0 ? "Zero coefficients" : `${percent} of block area`],
-      // Same logarithmic scale as the heatmap, not residual amplitude.
-      bar: Math.log2(1 + 255 * Math.min(1, density)) / 8,
-      detail: [`Non-zero coefficients: ${block.coeffNonZero}`, `Count / block area: ${percent}`, ...(block.txSize ? [`Transform: ${block.txSize}`] : []), "Coefficient activity, not signed residual pixels"],
+      compact: symbol, accent: cssColor, bar,
+      lines: [density === 0 ? "Zero coefficients" : `${label} · ${percent}`, `NZ ${count} / ${area}`],
+      // Intermediate variants expose meaning before falling back to the legend
+      // symbol. Even moderately zoomed blocks can show more than a bare count.
+      variants: [[label, `${percent} · NZ ${count}`], [label, `NZ ${count}`, percent], [label, percent], [`${symbol} ${percent}`]],
+      detail: [`Coefficient density: ${label} · ${percent}`, `Non-zero coefficients: ${count}`,
+        `Count / block area: ${count} / ${area} = ${percent}`,
+        ...(density === 0 ? ["No non-zero coefficients were recorded for this block."] : []),
+        ...(block.txSize ? [`Transform: ${block.txSize}${block.txType ? ` · ${block.txType}` : ""}`] : []),
+        "NZ counts transform coefficients; it does not measure residual brightness or prediction error.",
+        ...(block.skip ? ["Transform skipped"] : [])],
     };
   }
   if (layer === "motion") {
@@ -87,7 +98,10 @@ export function layoutBlockAnnotations(blocks, { layer, width, height, bounds, v
     const content = blockAnnotationContent(block, layer, options);
     if (!content) continue;
     const roomy = bw >= 130 && bh >= 50;
-    const variants = [...(roomy ? [{ lines: content.lines, fontSize: 11, padding: 12 }] : []), { lines: [content.lines[0]], fontSize: 11, padding: 12 }, { lines: [content.compact], fontSize: 10, padding: 4 }, { lines: [content.compact], fontSize: 9, padding: 2 }];
+    const residual = layer === "coefficients";
+    const variants = [...(roomy || residual ? [{ lines: content.lines, fontSize: 11, padding: 12 }] : []),
+      ...(content.variants ?? []).map((lines) => ({ lines, fontSize: 10, padding: 8 })),
+      { lines: [content.lines[0]], fontSize: 11, padding: 12 }, { lines: [content.compact], fontSize: 10, padding: 4 }, { lines: [content.compact], fontSize: 9, padding: 2 }];
     const fit = variants.map(({ lines, fontSize, padding }) => ({
       lines, fontSize, labelWidth: Math.max(...lines.map((line) => line.length * fontSize * 0.61)) + padding,
       labelHeight: lines.length * (fontSize + 2) + 2 + (lines.length > 1 && content.bar != null ? 4 : 0),
@@ -97,7 +111,8 @@ export function layoutBlockAnnotations(blocks, { layer, width, height, bounds, v
     const left = block.x * sx + (bw - labelWidth) / 2;
     const top = block.y * sy + (layer === "motion" ? 2 : (bh - labelHeight) / 2);
     if (left + offsetX + labelWidth < 0 || top + offsetY + labelHeight < 0 || left + offsetX > viewport.width || top + offsetY > viewport.height) continue;
-    candidates.push({ blockId: block.blockId, left, top, width: labelWidth, height: labelHeight, lines, fontSize, tone: content.tone, bar: lines.length > 1 ? content.bar : null });
+    candidates.push({ blockId: block.blockId, left, top, width: labelWidth, height: labelHeight, lines, fontSize, tone: content.tone,
+      accent: content.accent, bar: lines.length > 1 ? content.bar : null });
   }
   candidates.sort((a, b) => Number(b.blockId === selectedBlockId) - Number(a.blockId === selectedBlockId) || b.width * b.height - a.width * a.height);
   const cells = new Map(), result = [];
@@ -128,10 +143,16 @@ export function paintBlockAnnotationElements(root, items, document) {
     // CSSOM assignment is allowed by style-src 'self'. HTML style attributes
     // are blocked by that policy and would stack every label at the origin.
     Object.assign(label.style, { left: `${item.left}px`, top: `${item.top}px`, width: `${item.width}px`, height: `${item.height}px`, fontSize: `${item.fontSize}px`, lineHeight: `${item.fontSize + 2}px` });
+    if (item.accent) {
+      label.style.boxShadow = `inset 2px 0 ${item.accent}`;
+      // Symbol-only labels need the same colour key as larger labels.
+      if (item.lines.length === 1) label.style.color = item.tone === "zero" ? "#dce5ed" : item.accent;
+    }
     if (item.bar != null) {
       const meter = document.createElement("i"), fill = document.createElement("i");
       meter.className = "coefficient-meter";
       fill.style.width = `${item.bar * 100}%`;
+      if (item.accent) fill.style.backgroundColor = item.accent;
       meter.append(fill); label.append(meter);
     }
     root.append(label);

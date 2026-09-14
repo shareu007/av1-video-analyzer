@@ -47,11 +47,37 @@ test("coefficient annotations preserve missing, zero, positive density and bound
   const zero = blockAnnotationContent(base({ coeffNonZero: 0, width: 8, height: 8 }), "coefficients");
   const positive = blockAnnotationContent(base({ coeffNonZero: 8, width: 8, height: 8 }), "coefficients");
   assert.equal(missing.tone, "unknown");
+  assert.equal(missing.compact, "?");
+  assert.equal(missing.lines[0], "No data");
   assert.match(missing.detail[0], /unavailable/);
   assert.equal(zero.tone, "zero");
+  assert.equal(zero.lines[0], "Zero coefficients");
   assert.equal(zero.bar, 0);
   assert.equal(positive.tone, "residual");
-  assert.ok(positive.bar > 0 && positive.bar <= 1);
+  assert.equal(positive.bar, 0.125);
+  assert.deepEqual(positive.lines, ["Medium · 12.5%", "NZ 8 / 64"]);
+  assert.match(positive.detail.join(" "), /does not measure residual brightness or prediction error/);
+  const overflow = blockAnnotationContent(base({ coeffNonZero: 100, width: 8, height: 8 }), "coefficients");
+  assert.equal(overflow.compact, "!");
+  assert.equal(overflow.tone, "unknown");
+  assert.equal(overflow.bar, undefined);
+  assert.match(overflow.detail.join(" "), /Density grading is unavailable/);
+});
+
+test("residual zoom expands a category symbol into density and an explained count", () => {
+  const block = base({ width: 16, height: 16, coeffNonZero: 12, txSize: "TX_8X8", txType: "DCT_DCT" });
+  const at = (size) => layoutBlockAnnotations([block], { layer: "coefficients", width: 16, height: 16, bounds: { width: size, height: size } })[0];
+  assert.deepEqual(at(16).lines, ["S"]);
+  assert.deepEqual(at(64).lines, ["Sparse", "NZ 12", "4.7%"]);
+  assert.deepEqual(at(128).lines, ["Sparse · 4.7%", "NZ 12 / 256"]);
+  assert.equal(at(128).bar, 12 / 256);
+  const detail = blockAnnotationContent(block, "coefficients").detail.join(" ");
+  assert.match(detail, /12 \/ 256 = 4.7%/);
+  assert.match(detail, /Transform: TX_8X8 · DCT_DCT/);
+  for (const size of [16, 24, 32, 48, 64, 96, 128, 192]) {
+    const item = at(size);
+    assert.ok(item && item.width < size && item.height < size, `label must fit at ${size}px`);
+  }
 });
 
 test("motion annotations scale precision, signs, refs and compound vectors", () => {
@@ -119,7 +145,7 @@ test("paints annotation positions through CSSOM and keeps label text inert", () 
   const doc = documentMock();
   paintBlockAnnotationElements(root, [
     { blockId: 1, left: 4, top: 8, width: 30, height: 14, fontSize: 10, tone: "zero", lines: ["<img src=x>"] },
-    { blockId: 2, left: 44, top: 28, width: 30, height: 14, fontSize: 10, tone: "residual", lines: ["NZ 2"], bar: 0.25 },
+    { blockId: 2, left: 44, top: 28, width: 30, height: 14, fontSize: 10, tone: "residual", lines: ["D"], bar: 0.25, accent: "rgb(255,117,89)" },
   ], doc);
   assert.equal(root.innerHTML, "");
   assert.equal(root.children.length, 2);
@@ -129,6 +155,8 @@ test("paints annotation positions through CSSOM and keeps label text inert", () 
   assert.equal(root.children[0].textContent, "<img src=x>");
   assert.equal(root.children[0].children.length, 0);
   assert.equal(root.children[1].children[0].children[0].style.width, "25%");
+  assert.equal(root.children[1].children[0].children[0].style.backgroundColor, "rgb(255,117,89)");
+  assert.equal(root.children[1].style.color, "rgb(255,117,89)");
 });
 
 test("16px residual blocks produce labels at many positions", () => {

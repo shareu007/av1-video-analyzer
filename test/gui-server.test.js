@@ -122,7 +122,10 @@ test("media/test streams analyze through the GUI route with real block data", as
       assert.doesNotMatch(blockAnnotationContent(intra, "mode").lines[0], /INTRA_\d|Unavailable/);
       const residual = blocks.find((block) => block.coeffNonZero > 0);
       assert.ok(residual);
-      assert.equal(blockAnnotationContent(residual, "coefficients").lines[0], `NZ ${residual.coeffNonZero}`);
+      const residualContent = blockAnnotationContent(residual, "coefficients");
+      assert.match(residualContent.lines[0], /^(Sparse|Medium|Dense) · [\d.]+%$/);
+      assert.equal(residualContent.lines[1], `NZ ${residual.coeffNonZero} / ${residual.width * residual.height}`);
+      assert.equal(residualContent.bar, residual.coeffNonZero / (residual.width * residual.height));
       const motion = blocks.find((block) => block.mv.length > 0);
       assert.match(blockAnnotationContent(motion, "motion").detail[0], /MV1 R\d: Δx .* px/);
       const referenceStates = buildReferenceStateIndex(report);

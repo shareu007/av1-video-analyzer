@@ -401,7 +401,7 @@ test("frame navigation keeps the selected OBU and structure scope synchronized",
   assert.equal(elements.get("previous-frame").disabled, true);
   await elements.get("next-frame").dispatch("click");
   assert.equal(app.state.selectedFrameId, 1);
-  assert.equal(app.state.selection.id, app.state.report.frames[1].obuIds[0]);
+  assert.equal(app.state.selection.id, app.state.report.obus.find((obu) => obu.frameId === 1 && obu.frameHeaderSummary?.showFrame)?.obuId);
   assert.match(tree.innerHTML, /Frame 1/);
   assert.doesNotMatch(tree.innerHTML, /Frame 0/);
   const all = elements.get("structure-all-frames");
@@ -581,7 +581,14 @@ test("block layer controls redraw, preserve explicit boundaries and clean up res
   await node("#block-layer").dispatch("change", { target: { value: "coefficients" } });
   assert.equal(sources.innerHTML, "");
   assert.match(labelText(), /NZ 24/);
+  assert.match(labelText(), /Sparse · 0.6%/);
+  assert.match(legendText(), /S = Sparse · >0–5%/);
+  assert.match(legendText(), /D = Dense · >20%/);
+  assert.match(readout.innerHTML, /Residuals · coefficient density/);
   assert.match(readout.innerHTML, /Non-zero coefficients: 0/);
+  await canvas.dispatch("click", { clientX: 80, clientY: 20 });
+  assert.match(readout.innerHTML, /Coefficient density: Sparse · 0.6%/);
+  assert.match(readout.innerHTML, /24 \/ 4096 = 0.6%/);
   await node("#mv-toggle").dispatch("change", { target: { checked: true } });
   await node("#block-layer").dispatch("change", { target: { value: "motion" } });
   await canvas.dispatch("click", { clientX: 80, clientY: 20 });
@@ -658,4 +665,124 @@ test("preview defers luma computation until statistics are expanded", async () =
   assert.match(details.markup, /Luma histogram/);
   await details.dispatch("toggle");
   assert.equal(statsRequests, 1);
+});
+
+// Exercise the real rendering/selection code; only geometry and WebGL are stubbed.
+function picturePreviewDom({ elements, context }) {
+  const viewport = elements.get("viewport-content"), nodes = new Map();
+  const markup = Object.getOwnPropertyDescriptor(viewport.constructor.prototype, "innerHTML");
+  Object.defineProperty(viewport, "innerHTML", {
+    get() { return markup.get.call(this); },
+    set(value) { markup.set.call(this, value); nodes.clear(); },
+  });
+  viewport.querySelector = (selector) => {
+    if (!nodes.has(selector)) {
+      const node = new viewport.constructor();
+      node.insertAdjacentHTML = (_position, text) => { node.markup += text; };
+      node.parentElement = { insertAdjacentHTML() {} };
+      nodes.set(selector, node);
+    }
+    return nodes.get(selector);
+  };
+  context.setupBlockOverlay = (blocks) => { context.window.drawnPictureBlocks = blocks; };
+  return { viewport, nodes };
+}
+
+async function hiddenPictureSample(t) {
+  try { return await readFile(new URL("../media/test_256x256_av1.ivf", import.meta.url)); }
+  catch (error) { if (error.code !== "ENOENT") throw error; t.skip("local test media is not installed"); return null; }
+}
+
+test("real hidden-picture OBU and dropdown selection change preview without leaving the packet", async (t) => {
+  const bytes = await hiddenPictureSample(t);
+  if (!bytes) return;
+  const report = await analyzeGuiBuffer(bytes, "test_256x256_av1.ivf");
+  const requests = [];
+  const harness = await client(async (url) => {
+    if (url === "/api/health") return health();
+    requests.push(url);
+    if (url.startsWith("/api/frame-stats")) return Response.json({ histogram: [1], minimum: 0, maximum: 0, mean: 0, standardDeviation: 0 });
+    return new Response(new Blob([url]));
+  });
+  const { app, elements, context } = harness;
+  const { viewport, nodes } = picturePreviewDom(harness);
+  app.state.report = report;
+  app.state.bytes = bytes;
+  app.state.file = { name: "test_256x256_av1.ivf" };
+  app.state.view = "frame";
+  app.state.analysisMode = "predictions";
+  app.state.overlay = { frames: [{ frameId: 1, blocks: [{ blockId: 1, x: 0, y: 0, width: 64, height: 64, plane: 0, mode: "inter", refs: [1], mv: [] }] }] };
+  const settle = async () => { while (app.state.controllers.size) await new Promise(setImmediate); };
+  vm.runInContext("selectFrame(1)", context);
+  await settle();
+  assert.equal(app.state.selection.id, 7);
+  assert.match(viewport.innerHTML, /shown picture · Header OBU 7/);
+  assert.match(viewport.innerHTML, /class="block-overlay"/);
+  const shownUrl = app.state.previews.get("picture:7").url;
+  for (const [obuId, displayIndex, name] of [[4, 8, "1"], [5, 4, "2"], [6, 2, "3"]]) {
+    if (obuId === 4) await elements.get("structure-tree").querySelector(`[data-obu-id="${obuId}"]`).dispatch("click");
+    else await nodes.get("#preview-picture").dispatch("change", { target: { value: String(obuId) } });
+    await settle();
+    assert.equal(app.state.selectedFrameId, 1);
+    assert.equal(app.state.selection.id, obuId);
+    assert.equal(requests.at(-1), `/api/preview?frame=${displayIndex}`);
+    assert.match(viewport.innerHTML, new RegExp(`hidden picture ${name} · Header OBU ${obuId}`));
+    assert.match(viewport.innerHTML, new RegExp(`<option value="${obuId}" selected>`));
+    assert.match(viewport.innerHTML, /Block data unavailable for this picture/);
+    assert.doesNotMatch(viewport.innerHTML, /class="block-overlay"/);
+    assert.notEqual(app.state.previews.get(`picture:${obuId}`).url, shownUrl);
+    assert.equal(vm.runInContext("referenceStateFor(1).obuId", context), obuId);
+    assert.match(elements.get("timeline").nextSibling.innerHTML, new RegExp(`Viewing Frame 1 · hidden picture ${name}`));
+    assert.doesNotMatch(elements.get("timeline").nextSibling.innerHTML, /Usage: \d+ inter/);
+  }
+  const details = nodes.get("#luma-details");
+  details.open = true;
+  await details.dispatch("toggle");
+  await settle();
+  assert.equal(requests.at(-1), "/api/frame-stats?frame=2");
+  assert.match(details.markup, /Luma histogram/);
+  let exported;
+  context.downloadBlob = (_blob, filename) => { exported = filename; };
+  await elements.get("png-button").dispatch("click");
+  assert.equal(requests.at(-1), "/api/preview?frame=2");
+  assert.match(exported, /frame-1.obu-6.png$/);
+  const beforeReturn = requests.length;
+  await nodes.get("#preview-picture").dispatch("change", { target: { value: "7" } });
+  await settle();
+  assert.equal(requests.length, beforeReturn, "shown picture reuses its own cache");
+  assert.match(viewport.innerHTML, /class="block-overlay"/);
+  assert.match(viewport.innerHTML, /shown picture · Header OBU 7/);
+  assert.equal(app.state.analysisMode, "predictions");
+  for (const preview of app.state.previews.values()) URL.revokeObjectURL(preview.url);
+});
+
+test("late hidden-picture previews cannot overwrite a newer selection and unmapped pictures stay unavailable", async (t) => {
+  const bytes = await hiddenPictureSample(t);
+  if (!bytes) return;
+  const report = await analyzeGuiBuffer(bytes, "test_256x256_av1.ivf");
+  const pending = [];
+  const harness = await client(async (url, options) => url === "/api/health" ? health() : new Promise((resolve) => pending.push({ url, resolve, signal: options.signal })));
+  const { app, context } = harness;
+  const { viewport } = picturePreviewDom(harness);
+  Object.assign(app.state, { report, bytes, view: "frame", selectedFrameId: 1, selection: { kind: "obu", id: 4 } });
+  const old = vm.runInContext("renderFramePreview()", context);
+  vm.runInContext("selectPicture(5)", context);
+  assert.equal(pending[0].signal.aborted, true);
+  assert.deepEqual(pending.map(({ url }) => url), ["/api/preview?frame=8", "/api/preview?frame=4"]);
+  pending[1].resolve(new Response(new Blob(["H2"])));
+  while (app.state.controllers.size) await new Promise(setImmediate);
+  pending[0].resolve(new Response(new Blob(["late H1"])));
+  await old;
+  assert.equal(app.state.previews.has("picture:4"), false);
+  assert.equal(app.state.previews.get("picture:5").status, "ready");
+  assert.match(viewport.innerHTML, /hidden picture 2 · Header OBU 5/);
+  const hidden = vm.runInContext("pictureStateIndex().obus.get(4).picture", context);
+  hidden.previewIndex = null;
+  hidden.previewFrameId = null;
+  vm.runInContext("selectPicture(4)", context);
+  assert.equal(pending.length, 2, "an unmapped hidden picture must not request the shown preview");
+  assert.match(viewport.innerHTML, /Preview unavailable for this picture/);
+  assert.doesNotMatch(viewport.innerHTML, /<img|class="block-overlay"/);
+  assert.match(viewport.innerHTML, /id="preview-picture"/);
+  for (const preview of app.state.previews.values()) URL.revokeObjectURL(preview.url);
 });

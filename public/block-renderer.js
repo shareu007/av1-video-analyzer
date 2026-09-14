@@ -142,11 +142,33 @@ export function coefficientDensity(block) {
   return block.coeffNonZero / (block.width * block.height);
 }
 
+// Fixed UI density bands, not codec modes or residual-amplitude categories.
+// Share these colours and boundaries between the image, labels and legend.
+const COEFFICIENT_BANDS = [
+  { level: "zero", label: "Zero", symbol: "0", maximum: 0, color: [0.16, 0.19, 0.24] },
+  { level: "sparse", label: "Sparse", symbol: "S", maximum: 0.05, color: [0.36, 0.70, 0.94] },
+  { level: "medium", label: "Medium", symbol: "M", maximum: 0.20, color: [0.96, 0.77, 0.34] },
+  { level: "dense", label: "Dense", symbol: "D", maximum: 1, color: [1.00, 0.46, 0.35] },
+];
+const COEFFICIENT_UNKNOWN = { level: "unknown", label: "No data", symbol: "?", color: [0.51, 0.59, 0.66] };
+
+export function coefficientActivity(block) {
+  const density = coefficientDensity(block);
+  const percent = density === null ? "—" : density > 0 && density < 0.001 ? "<0.1%" : `${Number((density * 100).toFixed(1))}%`;
+  // Clipped geometry can leave the count larger than the displayed area.
+  // Do not present that ratio as a valid density band or a full activity bar.
+  const band = density === null ? COEFFICIENT_UNKNOWN
+    : density > 1 ? { ...COEFFICIENT_UNKNOWN, level: "overflow", label: "Area?", symbol: "!" }
+      : COEFFICIENT_BANDS.find((entry) => density <= entry.maximum);
+  return { ...band, density, percent, bar: density !== null && density <= 1 ? density : null,
+    cssColor: `rgb(${band.color.map((value) => Math.round(value * 255)).join(",")})` };
+}
+
 export function blockAnalysisLabel(block, layer) {
   if (layer === "mode") return block.intraMode != null ? intraPredictionName(block.intraMode) : block.interMode ?? block.mode ?? "Unavailable";
   if (layer === "coefficients") {
-    const density = coefficientDensity(block);
-    return density === null ? "N/A" : `${block.coeffNonZero} · ${(density * 100).toFixed(1)}%`;
+    const activity = coefficientActivity(block);
+    return activity.density === null ? "No data" : `${activity.label} · ${activity.percent} · NZ ${block.coeffNonZero}`;
   }
   return "";
 }
@@ -154,11 +176,7 @@ export function blockAnalysisLabel(block, layer) {
 function colorFor(block, layer, opacity) {
   if (layer === "none" || layer === "partition" || layer === "motion") return [0, 0, 0, 0];
   if (layer === "coefficients") {
-    const density = coefficientDensity(block);
-    if (density === null) return [0.51, 0.59, 0.66, opacity];
-    if (density === 0) return [0.06, 0.08, 0.12, opacity];
-    const value = Math.log2(1 + 255 * Math.min(1, density)) / 8;
-    return [value, 0.25 + (1 - value) * 0.55, 1 - value, opacity];
+    return [...coefficientActivity(block).color, opacity];
   }
   if (layer === "mode" && /^INTRA_\d+$/.test(block.intraMode ?? "")) {
     const code = Number(block.intraMode.slice(6));
@@ -206,7 +224,11 @@ export function buildBlockInstanceData(blocks, { layer = "mode", opacity = 0.28 
 export function blockLayerLegend(layer) {
   if (layer === "mode") return [...INTRA_NAMES.map((label, code) => ({ label, color: `rgb(${colorFor({ intraMode: `INTRA_${code}` }, "mode", 1).slice(0, 3).map((v) => Math.round(v * 255)).join(",")})` })), { label: "Inter prediction", color: "#4ba4ff" }, { label: "Skip", color: "#ffb547" }];
   if (layer === "motion") return [{ label: "Motion vectors · reference colors in Block statistics", color: null }];
-  if (layer === "coefficients") return [{ label: "Zero coefficients", color: "#0f141f" }, { label: "Sparse → dense (log scale, 0–100%)", color: "linear-gradient(90deg,#00ccff,#ff4000)" }, { label: "Labels: non-zero count · count / block area", color: null }, { label: "Unavailable", color: "#8296a8" }];
+  if (layer === "coefficients") return [
+    { count: 0, label: "0 = Zero" }, { count: 5, label: "S = Sparse · >0–5%" },
+    { count: 20, label: "M = Medium · >5–20%" }, { count: 100, label: "D = Dense · >20%" },
+    { count: null, label: "? = No data" },
+  ].map(({ count, label }) => ({ label, color: coefficientActivity({ coeffNonZero: count, width: 10, height: 10 }).cssColor }));
   if (layer === "none") return [{ label: "Original frame · no block overlay", color: null }];
   if (layer === "partition") return [{ label: "Coding block boundaries", color: "#ebf7ff" }];
   if (layer === "qindex") return [

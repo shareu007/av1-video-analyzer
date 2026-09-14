@@ -8,7 +8,7 @@ export function analysisModes(blocks, supports = () => true) {
   return [
     { id: "coding-flow", label: "Coding flow", layer: "partition", available: blocks.length > 0, note: "Coding block layout. Decode traversal order is not available." },
     { id: "predictions", label: "Predictions", layer: "mode", available: supports("mode") && hasMode, note: "Select an Inter block to show its reference picture, MV source area and overlapping coding blocks below the image. Intra direction symbols are schematic. Angle deltas and predicted pixel samples are not available." },
-    { id: "residuals", label: "Residuals", layer: "coefficients", available: supports("coefficient") && hasCoefficients, note: "Block numbers = non-zero coefficients (NZ); bars and colors use a logarithmic count / block area scale. Zero and unavailable are distinct. Edge clipping can inflate the ratio. Signed residual samples are not available." },
+    { id: "residuals", label: "Residuals", layer: "coefficients", available: supports("coefficient") && hasCoefficients, note: "Words and colors show coefficient density, not residual amplitude. NZ = non-zero coefficients; % and bar = count / block area. Zoom for counts; hover or click for details. Edge clipping can inflate density (! = area mismatch). Signed residual samples are not available." },
     { id: "reconstruction", label: "Reconstruction", available: false, note: "Pre-filter reconstruction samples are not available." },
     { id: "deblocking", label: "Deblocking", available: false, note: "Before/after deblocking samples and filtered-edge data are not available." },
     { id: "sao", label: "SAO", available: false, note: "SAO is not an AV1 coding tool." },

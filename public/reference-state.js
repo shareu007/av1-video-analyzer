@@ -49,7 +49,12 @@ export function namedReferenceBindings(referenceState) {
 // Replay coded headers, including hidden pictures in a container packet. A
 // picture is identified by its OBU, not just its container frame ID.
 export function buildReferenceStateIndex(report) {
-  const slots = Array(8).fill(null), states = new Map();
+  return buildPictureStateIndex(report).frames;
+}
+
+export function buildPictureStateIndex(report) {
+  const slots = Array(8).fill(null), states = new Map(), obus = new Map();
+  let previewIndex = 0;
   const packetPictures = new Map();
   const headers = (report.obus ?? []).filter((obu) => (obu.frameHeaderSummary || [3, 6].includes(obu.type?.code)) && obu.type?.code !== 7);
   const events = headers.length ? headers : (report.frames ?? []).map((frame) => ({ frameId: frame.frameId, obuId: null, frameHeaderSummary: frame.headerSummary }));
@@ -57,7 +62,12 @@ export function buildReferenceStateIndex(report) {
     const summary = obu.frameHeaderSummary;
     if (!summary) {
       slots.fill(null);
-      states.set(obu.frameId, { frameId: obu.frameId, obuId: obu.obuId, summary: {}, before: slots.slice(), after: slots.slice(), bindings: [], picture: null });
+      // An unparsed coded header may or may not emit a displayed picture.
+      // Subsequent output ordinals cannot safely be inferred from packet IDs.
+      if (obu.obuId != null) previewIndex = null;
+      const unknown = { frameId: obu.frameId, obuId: obu.obuId, summary: {}, before: slots.slice(), after: slots.slice(), bindings: [], picture: null };
+      states.set(obu.frameId, unknown);
+      if (obu.obuId != null) obus.set(obu.obuId, unknown);
       continue;
     }
     for (const slot of summary.invalidatedReferenceSlots ?? []) if (slot >= 0 && slot < 8) slots[slot] = null;
@@ -71,20 +81,33 @@ export function buildReferenceStateIndex(report) {
     if (!packetPictures.has(obu.frameId)) packetPictures.set(obu.frameId, []);
     const pictures = packetPictures.get(obu.frameId);
     const picture = summary.showExistingFrame ? before[summary.frameToShowMapIdx] ?? null
-      : { frameId: obu.frameId, obuId: obu.obuId, summary, hidden: !summary.showFrame, previewFrameId: summary.showFrame ? obu.frameId : null };
+      : { frameId: obu.frameId, obuId: obu.obuId, summary, hidden: !summary.showFrame, previewFrameId: summary.showFrame ? obu.frameId : null, previewIndex: summary.showFrame ? previewIndex : null };
     if (picture && !summary.showExistingFrame) {
       if (picture.hidden) picture.hiddenIndex = pictures.filter((entry) => entry.hidden).length + 1;
       pictures.push(picture);
     }
     // A hidden picture may later become viewable via show_existing_frame.
-    if (picture && summary.showExistingFrame && picture.previewFrameId == null) picture.previewFrameId = obu.frameId;
+    if (picture && summary.showExistingFrame && picture.previewFrameId == null) {
+      picture.previewFrameId = obu.frameId;
+      picture.previewIndex = previewIndex;
+    }
+    if (previewIndex !== null && (summary.showFrame || summary.showExistingFrame)) previewIndex++;
     if (Number.isInteger(summary.refreshFrameFlags)) {
       for (let slot = 0; slot < 8; slot++) if (summary.refreshFrameFlags & (1 << slot)) slots[slot] = picture;
     } else slots.fill(null); // Never claim stale state after an incomplete header.
     const state = { frameId: obu.frameId, obuId: obu.obuId, summary, before, after: slots.slice(), bindings, picture, packetPictures: pictures };
+    if (obu.obuId != null) obus.set(obu.obuId, state);
     if (!states.has(obu.frameId) || summary.showFrame || summary.showExistingFrame) states.set(obu.frameId, state);
   }
-  return states;
+  // Tile groups and redundant headers inspect the same picture, but never
+  // inherit a header from a different packet or across a temporal delimiter.
+  let current = null;
+  for (const obu of report.obus ?? []) {
+    if (current?.frameId !== obu.frameId || obu.type?.code === 2) current = null;
+    if (obus.has(obu.obuId)) current = obus.get(obu.obuId);
+    else if (current && [4, 7].includes(obu.type?.code)) obus.set(obu.obuId, current);
+  }
+  return { frames: states, obus };
 }
 
 export function pictureLabel(picture, { compact = false, frameId = null } = {}) {
@@ -99,7 +122,7 @@ export function currentPictureDescription(referenceState) {
   const current = pictureLabel(referenceState.picture);
   if (referenceState.summary?.showExistingFrame) return `Frame ${referenceState.frameId} displays ${current} from the reference cache; no new picture is coded.`;
   const hiddenCount = referenceState.packetPictures?.filter((picture) => picture.hidden).length ?? 0;
-  return `Viewing ${current}.${hiddenCount ? ` This packet also contains ${hiddenCount} hidden reference picture${hiddenCount === 1 ? "" : "s"}.` : ""}`;
+  return `Viewing ${current}.${hiddenCount ? ` This packet ${referenceState.picture.hidden ? "contains" : "also contains"} ${hiddenCount} hidden reference picture${hiddenCount === 1 ? "" : "s"}.` : ""}`;
 }
 
 export function samePacketReference(picture, referenceState) {

@@ -25,7 +25,7 @@ import { analysisModes } from "./analysis-modes.js";
 import { attachPreviewPan } from "./preview-pan.js";
 import { frameReferenceTargets } from "./frame-references.js";
 import { blockAnnotationContent, layoutBlockAnnotations, paintBlockAnnotationElements } from "./block-annotations.js";
-import { buildReferenceStateIndex, blockPredictionSources, timelineReferenceArcs, pictureLabel, currentPictureDescription, samePacketReference, referenceBlockUsage, REFERENCE_NAMES, namedReferenceBindings, referenceUsageTone, referenceTimelineTargets } from "./reference-state.js";
+import { buildPictureStateIndex, blockPredictionSources, timelineReferenceArcs, pictureLabel, currentPictureDescription, samePacketReference, referenceBlockUsage, REFERENCE_NAMES, namedReferenceBindings, referenceUsageTone, referenceTimelineTargets } from "./reference-state.js";
 
 const elements = {
   openButton: document.querySelector("#open-button"),
@@ -1229,7 +1229,7 @@ function selectFrame(frameId) {
   state.selectedFrameId = frameId;
   state.selectedBlock = null;
   abortOperations("preview", "luma", "compare", "compare-preview");
-  state.selection = frame.obuIds.length ? { kind: "obu", id: frame.obuIds[0] } : null;
+  state.selection = frame.obuIds.length ? { kind: "obu", id: pictureStateIndex()?.frames.get(frameId)?.obuId ?? frame.obuIds[0] } : null;
   renderTimeline();
   renderStructure();
   renderSelection();
@@ -1470,7 +1470,7 @@ function renderTimeline() {
   const referenceState = referenceStateFor(selectedFrame.frameId);
   const summary = referenceState?.summary ?? displayedFrameSummary(report, selectedFrame);
   const usage = !summary.showExistingFrame && overlaySupportsFeature("motion-vector")
-    ? referenceBlockUsage(state.overlay?.frames?.find((frame) => frame.frameId === selectedFrame.frameId)?.blocks) : null;
+    ? referenceBlockUsage(selectedPictureOverlay(selectedFrame.frameId)?.blocks) : null;
   const { targets, unresolvedSlots } = frameReferenceTargets(report, selectedFrame, summary);
   const visibleIds = new Set(report.frames.slice(windowStart, windowStart + 80).map((frame) => frame.frameId));
   for (const target of targets) visibleIds.add(target.frameId);
@@ -1590,10 +1590,57 @@ function renderTimeline() {
   state.timelineCleanup = () => { observer?.disconnect(); if (arrowFrame != null) cancelAnimationFrame(arrowFrame); };
 }
 
-function referenceStateFor(frameId) {
+function pictureStateIndex() {
   if (!state.report) return null;
-  if (!state.referenceStateCache.has(state.report)) state.referenceStateCache.set(state.report, buildReferenceStateIndex(state.report));
-  return state.referenceStateCache.get(state.report).get(frameId) ?? null;
+  if (!state.referenceStateCache.has(state.report)) state.referenceStateCache.set(state.report, buildPictureStateIndex(state.report));
+  return state.referenceStateCache.get(state.report);
+}
+
+function referenceStateFor(frameId) {
+  const index = pictureStateIndex();
+  const selected = frameId === state.selectedFrameId ? index?.obus.get(selectedObu()?.obuId) : null;
+  return selected?.frameId === frameId ? selected : index?.frames.get(frameId) ?? null;
+}
+
+function selectedPictureOverlay(frameId) {
+  const selected = referenceStateFor(frameId);
+  // Native overlays currently describe only the packet's displayed picture.
+  // A hidden picture's later display packet does not provide its coding blocks.
+  if (selected?.picture?.hidden || selected?.summary?.showExistingFrame || selected && !selected.picture) return null;
+  const displayed = pictureStateIndex()?.frames.get(frameId);
+  if (displayed && selected?.obuId != null && displayed.obuId !== selected.obuId) return null;
+  return state.overlay?.frames?.find((frame) => frame.frameId === frameId) ?? null;
+}
+
+function picturePreviewTarget() {
+  const frameId = state.selectedFrameId;
+  const referenceState = referenceStateFor(frameId);
+  const picture = referenceState?.picture;
+  return { frameId, referenceState, picture,
+    cacheKey: picture?.obuId != null ? `picture:${picture.obuId}` : frameId,
+    previewIndex: picture ? picture.previewIndex !== undefined ? picture.previewIndex : picture.previewFrameId : referenceState?.obuId != null ? null : frameId,
+    label: picture ? `${pictureLabel(picture)} · Header OBU ${picture.obuId ?? "?"}` : `Frame ${frameId}` };
+}
+
+function selectPicture(obuId) {
+  const selected = pictureStateIndex()?.obus.get(obuId);
+  if (!selected || selected.frameId !== state.selectedFrameId) return;
+  abortOperations("preview", "luma");
+  state.selection = { kind: "obu", id: obuId };
+  state.selectedBlock = null;
+  renderTimeline();
+  renderStructure();
+  renderSelection();
+}
+
+function pictureControlsMarkup(target) {
+  const pictures = target.referenceState?.packetPictures ?? [];
+  const choices = pictures.length > 1 ? `<label>Picture <select id="preview-picture" aria-label="Picture within this packet">${pictures.map((picture) => `<option value="${picture.obuId}" ${picture.obuId === target.picture?.obuId ? "selected" : ""}>${picture.hidden ? `Hidden ${picture.hiddenIndex}` : "Shown"} · Header OBU ${picture.obuId}${picture.previewIndex === null || picture.previewIndex === undefined && picture.previewFrameId == null ? " · preview unavailable" : ""}</option>`).join("")}</select></label>` : "";
+  return `<div class="preview-toolbar picture-toolbar">${choices}<span>${escapeHtml(target.label)}${target.picture?.hidden && target.picture.previewFrameId != null ? ` · Preview via F${target.picture.previewFrameId}` : ""}</span></div>`;
+}
+
+function bindPictureControl() {
+  elements.viewportContent.querySelector("#preview-picture")?.addEventListener("change", (event) => selectPicture(Number(event.target.value)));
 }
 
 function obuMatches(obu) {
@@ -1635,12 +1682,13 @@ function renderStructure() {
       const id = Number(button.dataset.obuId);
       const obu = obuById.get(id);
       state.selection = { kind: "obu", id };
+      abortOperations("preview", "luma");
       if (obu?.frameId !== null && obu?.frameId !== undefined && obu.frameId !== state.selectedFrameId) {
         state.selectedFrameId = obu.frameId;
         abortOperations("preview", "luma", "compare", "compare-preview");
-        renderTimeline();
       }
       state.selectedBlock = null;
+      renderTimeline();
       renderStructure();
       renderSelection();
     });
@@ -2671,16 +2719,23 @@ function renderBlockStatisticsPanel(statistics, motionLegend = "") {
 }
 
 async function renderFramePreview() {
-  const frameId = state.selectedFrameId;
+  const target = picturePreviewTarget();
+  const { frameId, cacheKey, previewIndex } = target;
+  releaseBlockRenderer();
   if (frameId === null) {
     elements.viewportContent.innerHTML = `<div class="preview-error">Raw OBU streams have no decodable container frames</div>`;
     return;
   }
-  const cached = state.previews.get(frameId);
+  const pictureControls = pictureControlsMarkup(target);
+  if (previewIndex == null) {
+    elements.viewportContent.innerHTML = `${pictureControls}<div class="preview-error">Preview unavailable for this picture.<br><small>No mapped display event is available; direct hidden-picture decoding is not supported yet.</small></div>`;
+    bindPictureControl();
+    return;
+  }
+  const cached = state.previews.get(cacheKey);
   if (cached?.status === "ready") {
-    releaseBlockRenderer();
     const frame = state.report.frames.find(({ frameId: id }) => id === frameId);
-    const displaySummary = displayedFrameSummary(state.report, frame);
+    const displaySummary = target.picture?.summary ?? displayedFrameSummary(state.report, frame);
     const width = displaySummary.frameWidth ?? state.report.container?.width ?? 1;
     const height = displaySummary.frameHeight ?? state.report.container?.height ?? 1;
     const use128 = state.report.syntaxNodes.find(({ path }) => path === "sequence_header.use_128x128_superblock")?.value === 1;
@@ -2689,7 +2744,7 @@ async function renderFramePreview() {
     for (let x = sbSize; x < width; x += sbSize) lines.push(`<line x1="${x}" y1="0" x2="${x}" y2="${height}"></line>`);
     for (let y = sbSize; y < height; y += sbSize) lines.push(`<line x1="0" y1="${y}" x2="${width}" y2="${y}"></line>`);
     const grid = `<svg class="superblock-grid ${state.showSuperblockGrid ? "" : "hidden"}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><rect x=".5" y=".5" width="${Math.max(0, width - 1)}" height="${Math.max(0, height - 1)}"></rect>${lines.join("")}</svg>`;
-    const frameOverlay = state.overlay?.frames.find(({ frameId: id }) => id === frameId);
+    const frameOverlay = selectedPictureOverlay(frameId);
     const hasBlocks = (frameOverlay?.blocks.length ?? 0) > 0;
     const blocks = hasBlocks ? `<canvas class="block-overlay" width="${width}" height="${height}" aria-label="Coding blocks and motion vectors"></canvas>` : "";
     const modes = analysisModes(frameOverlay?.blocks ?? [], overlaySupportsFeature);
@@ -2738,14 +2793,17 @@ async function renderFramePreview() {
     const motionLegend = hasBlocks && motionFeatureAvailable ? `<div class="motion-vector-summary"><div><span>MV <b>${motionSummary.vectorCount}</b></span><span>Compound <b>${motionSummary.compoundBlockCount}</b></span><span>Zero <b>${motionSummary.zeroVectorCount}</b></span><span>Mean <b>${formatMotionPixels(motionSummary.meanMagnitudePixels)}</b></span><span>Max <b>${formatMotionPixels(motionSummary.maximumMagnitudePixels)}</b></span>${motionSummary.unknownPrecisionCount ? `<span class="warning">Unknown precision <b>${motionSummary.unknownPrecisionCount}</b></span>` : ""}</div><div class="motion-reference-legend">${motionReferences || "No reference slots"}</div></div>` : "";
     const blockStatisticsPanel = blockStatistics ? renderBlockStatisticsPanel(blockStatistics, motionLegend) : "";
     const visibleBlockCount = blockStatistics?.filterCounts[state.blockVisibilityFilter] ?? 0;
-    const noBlocksMessage = state.report.blockInspection?.status === "failed"
+    const noBlocksMessage = target.picture?.hidden
+      ? "Block data unavailable for this picture. Hidden-picture overlays have not been exported."
+      : state.report.blockInspection?.status === "failed"
       ? `${state.report.blockInspection.reason} (${state.report.blockInspection.code})`
       : state.report.blockInspection?.status === "ready"
         ? displaySummary.showExistingFrame
           ? `This frame reuses reference slot ${displaySummary.frameToShowMapIdx}; block records for the reused picture are unavailable.`
           : "No new block records for this frame. Select another frame to inspect coding blocks."
         : "Block inspection is disabled. Configure libaom inspection and reopen the stream, or import block data from Tools.";
-    elements.viewportContent.innerHTML = `<div class="frame-preview"><div class="preview-scroll"><div class="preview-stage"><img src="${cached.url}" alt="Frame ${frameId} decoded preview">${grid}${blocks}</div></div><div class="preview-caption"><span>${width}×${height}</span><label class="overlay-toggle"><input id="sb-grid-toggle" type="checkbox" ${state.showSuperblockGrid ? "checked" : ""}> ${sbSize}×${sbSize} SB grid</label></div>${layerControls}<div class="overlay-note">${hasBlocks ? `<span id="block-visible-count">${visibleBlockCount}</span> / ${frameOverlay.blocks.length} blocks visible` : escapeHtml(noBlocksMessage)}</div>${blockStatisticsPanel}</div>`;
+    elements.viewportContent.innerHTML = `<div class="frame-preview">${pictureControls}<div class="preview-scroll"><div class="preview-stage"><img src="${cached.url}" alt="${escapeHtml(target.label)} decoded preview">${grid}${blocks}</div></div><div class="preview-caption"><span>${width}×${height}</span><label class="overlay-toggle"><input id="sb-grid-toggle" type="checkbox" ${state.showSuperblockGrid ? "checked" : ""}> ${sbSize}×${sbSize} SB grid</label></div>${layerControls}<div class="overlay-note">${hasBlocks ? `<span id="block-visible-count">${visibleBlockCount}</span> / ${frameOverlay.blocks.length} blocks visible` : escapeHtml(noBlocksMessage)}</div>${blockStatisticsPanel}</div>`;
+    bindPictureControl();
     const stage = elements.viewportContent.querySelector(".preview-stage");
     stage.style.aspectRatio = `${width} / ${height}`;
     stage.style.width = state.previewZoom === "fit" ? `min(100%, ${width / height * 65}vh, ${width / height * 600}px)` : `${width * Number(state.previewZoom)}px`;
@@ -2779,20 +2837,23 @@ async function renderFramePreview() {
     lumaDetails.addEventListener("toggle", () => {
       if (lumaDetails.open && !lumaDetails.dataset.loaded) {
         lumaDetails.dataset.loaded = "true";
-        renderLumaStats(frameId);
+        renderLumaStats(previewIndex);
       }
     });
     return;
   }
   if (cached?.status === "error") {
-    elements.viewportContent.innerHTML = `<div class="preview-error">Frame preview unavailable<br><small>${escapeHtml(cached.message)}</small></div>`;
+    elements.viewportContent.innerHTML = `${pictureControls}<div class="preview-error">Frame preview unavailable<br><small>${escapeHtml(cached.message)}</small></div>`;
+    bindPictureControl();
     return;
   }
-  elements.viewportContent.innerHTML = `<div class="preview-loading"><span class="spinner"></span><p>Decoding Frame ${frameId}</p></div>`;
-  state.previews.set(frameId, { status: "loading" });
+  elements.viewportContent.innerHTML = `${pictureControls}<div class="preview-loading"><span class="spinner"></span><p>Decoding ${escapeHtml(target.label)}</p></div>`;
+  bindPictureControl();
+  if (cached?.status === "loading") return;
+  state.previews.set(cacheKey, { status: "loading" });
   const controller = replaceController("preview");
   try {
-    const response = await fetch(`/api/preview?frame=${frameId}`, {
+    const response = await fetch(`/api/preview?frame=${previewIndex}`, {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
       body: state.bytes,
@@ -2805,15 +2866,15 @@ async function renderFramePreview() {
     const blob = await response.blob();
     if (state.controllers.get("preview") !== controller) return;
     const url = URL.createObjectURL(blob);
-    state.previews.set(frameId, { status: "ready", url });
+    state.previews.set(cacheKey, { status: "ready", url });
   } catch (error) {
     if (state.controllers.get("preview") !== controller) return;
-    if (error.name === "AbortError") state.previews.delete(frameId);
-    else state.previews.set(frameId, { status: "error", message: error.message });
+    if (error.name === "AbortError") state.previews.delete(cacheKey);
+    else state.previews.set(cacheKey, { status: "error", message: error.message });
   } finally {
     if (state.controllers.get("preview") === controller) state.controllers.delete("preview");
   }
-  if (state.view === "frame" && state.selectedFrameId === frameId) renderFramePreview();
+  if (state.view === "frame" && picturePreviewTarget().cacheKey === cacheKey) renderFramePreview();
 }
 
 function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false) {
@@ -2876,10 +2937,16 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       sourcePanel.querySelectorAll("[data-source-jump]").forEach((button) => button.addEventListener("click", () => selectFrame(Number(button.dataset.sourceJump))));
       for (const source of sources) {
         if (!source.region || source.picture?.previewFrameId == null) continue;
-        const previewId = source.picture.previewFrameId;
+        const previewId = source.picture.previewIndex !== undefined ? source.picture.previewIndex : source.picture.previewFrameId;
+        if (previewId == null) {
+          const status = sourcePanel.querySelector(`[data-source-status="${source.index}"]`);
+          if (status) status.textContent = "Display output mapping unavailable";
+          continue;
+        }
         (async () => {
           try {
-            let url = state.previews.get(previewId)?.status === "ready" ? state.previews.get(previewId).url : null;
+            const cached = state.previews.get(`picture:${source.picture.obuId}`) ?? state.previews.get(previewId);
+            let url = cached?.status === "ready" ? cached.url : null;
             if (!url) {
               const response = await fetch(`/api/preview?frame=${previewId}`, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: state.bytes, signal: controller.signal });
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2924,8 +2991,8 @@ function setupBlockOverlay(blocks, width, height, motionVectorsAvailable = false
       paintSources(visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : null);
       readout.hidden = !enabled || state.blockLabels === "off";
       if (readout.hidden) { readout.innerHTML = ""; return; }
-      const heading = { mode: "Predictions · source pictures", coefficients: "Residuals · coefficient activity", motion: "Motion · prediction offsets" }[state.overlayLayer];
-      const key = { mode: "← = INTER source · BI = two predictors · H1/H2 = hidden pictures in that packet", coefficients: "NZ = non-zero coefficients · % = count / block area", motion: `R = reference identifier · (Δx, Δy) in pixels · Arrows ×${state.motionVectorScale}` }[state.overlayLayer];
+      const heading = { mode: "Predictions · source pictures", coefficients: "Residuals · coefficient density", motion: "Motion · prediction offsets" }[state.overlayLayer];
+      const key = { mode: "← = INTER source · BI = two predictors · H1/H2 = hidden pictures in that packet", coefficients: "NZ = non-zero coefficients · % / bar = count ÷ block area · S/M/D = Sparse/Medium/Dense", motion: `R = reference identifier · (Δx, Δy) in pixels · Arrows ×${state.motionVectorScale}` }[state.overlayLayer];
       const selected = visibleBlocks.includes(state.selectedBlock) ? state.selectedBlock : visibleBlocks.includes(hoveredBlock) ? hoveredBlock : null;
       const content = selected && blockAnnotationContent(selected, state.overlayLayer, options);
       if (content && state.overlayLayer === "mode") {
@@ -3131,7 +3198,7 @@ async function renderLumaStats(frameId) {
     } finally {
       if (state.controllers.get("luma") === controller) state.controllers.delete("luma");
     }
-    if (state.view === "frame" && state.selectedFrameId === frameId) {
+    if (state.view === "frame" && picturePreviewTarget().previewIndex === frameId) {
       const currentRoot = elements.viewportContent.querySelector("#luma-details");
       currentRoot?.querySelector(".luma-loading")?.remove();
       if (currentRoot?.open) renderLumaStats(frameId);
@@ -3484,16 +3551,18 @@ elements.csvButton.addEventListener("click", () => {
 });
 elements.pngButton.addEventListener("click", async () => {
   if (state.selectedFrameId === null) return;
+  const target = picturePreviewTarget();
+  if (target.previewIndex == null) { showToast("PNG export unavailable for this picture"); return; }
+  const stem = state.file?.name?.replace(/\.[^.]+$/, "") || "frame";
   elements.pngButton.disabled = true;
   try {
-    const response = await fetch(`/api/preview?frame=${state.selectedFrameId}`, {
+    const response = await fetch(`/api/preview?frame=${target.previewIndex}`, {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
       body: state.bytes,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const stem = state.file?.name?.replace(/\.[^.]+$/, "") || "frame";
-    downloadBlob(await response.blob(), `${stem}.frame-${state.selectedFrameId}.png`);
+    downloadBlob(await response.blob(), `${stem}.frame-${target.frameId}${target.picture?.obuId != null ? `.obu-${target.picture.obuId}` : ""}.png`);
     showToast("Current frame PNG exported");
   } catch (error) {
     showToast(`PNG export failed: ${error.message}`);

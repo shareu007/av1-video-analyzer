@@ -15,6 +15,7 @@ const {
   blockLayerLegend,
   overlayRasterSize,
   coefficientDensity,
+  coefficientActivity,
   intraPredictionName,
   blockAnalysisLabel,
 } = await import(moduleUrl);
@@ -29,12 +30,35 @@ test("prediction labels decode all AV1 intra base modes without inventing unknow
 test("coefficient display distinguishes unavailable, zero and normalized block activity", () => {
   assert.equal(coefficientDensity({ width: 8, height: 8, coeffNonZero: null }), null);
   assert.equal(coefficientDensity({ width: 8, height: 8, coeffNonZero: -1 }), null);
-  assert.equal(blockAnalysisLabel({ width: 8, height: 8, coeffNonZero: 0 }, "coefficients"), "0 · 0.0%");
+  assert.equal(blockAnalysisLabel({ width: 8, height: 8, coeffNonZero: 0 }, "coefficients"), "Zero · 0% · NZ 0");
   const small = { width: 8, height: 8, coeffNonZero: 4 };
   const large = { width: 16, height: 16, coeffNonZero: 16 };
   assert.equal(coefficientDensity(small), coefficientDensity(large));
   const colors = buildBlockInstanceData([small, large], { layer: "coefficients" }).colors;
   assert.deepEqual([...colors.slice(0, 4)], [...colors.slice(4)]);
+});
+
+test("coefficient density bands, labels, colors and legend share fixed boundaries", () => {
+  for (const [count, level, symbol] of [[0, "zero", "0"], [1, "sparse", "S"], [5, "sparse", "S"], [6, "medium", "M"], [20, "medium", "M"], [21, "dense", "D"], [100, "dense", "D"], [null, "unknown", "?"]]) {
+    const block = { width: 10, height: 10, coeffNonZero: count };
+    const activity = coefficientActivity(block);
+    assert.equal(activity.level, level, `count ${count}`);
+    assert.equal(activity.symbol, symbol);
+    assert.equal(activity.bar, count === null ? null : count / 100);
+    assert.ok(blockLayerLegend("coefficients").some((entry) => entry.label.startsWith(`${symbol} = `) && entry.color === activity.cssColor));
+    const colors = buildBlockInstanceData([block], { layer: "coefficients", opacity: 0.4 }).colors;
+    activity.color.forEach((value, index) => assert.ok(Math.abs(colors[index] - value) < 1e-6));
+  }
+  assert.equal(coefficientActivity({ width: 16, height: 16, coeffNonZero: 12 }).percent, "4.7%");
+  assert.equal(coefficientActivity({ width: 16, height: 16, coeffNonZero: 12 }).level, "sparse");
+  assert.equal(coefficientActivity({ width: 4, height: 4, coeffNonZero: 12 }).level, "dense");
+  const tiny = coefficientActivity({ width: 128, height: 128, coeffNonZero: 1 });
+  assert.equal(tiny.level, "sparse");
+  assert.equal(tiny.percent, "<0.1%");
+  const overflow = coefficientActivity({ width: 4, height: 4, coeffNonZero: 24 });
+  assert.equal(overflow.level, "overflow");
+  assert.equal(overflow.symbol, "!");
+  assert.equal(overflow.bar, null);
 });
 
 test("block spatial index picks the smallest overlapping block", () => {
